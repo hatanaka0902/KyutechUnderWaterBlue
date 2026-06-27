@@ -18,17 +18,21 @@ def AzimuthControl(target_x, target_y):
     >>> AzimuthControl(1, 1)
     45.0
     >>> AzimuthControl(0, -1)
-    270.0
+    -90.0
+    >>> AzimuthControl(0, 0)
+    0.0
+    >>> AzimuthControl(1, -1)
+    135.0
+    >>> AzimuthControl(-1, -1)
+    -45.0
+    >>> AzimuthControl(-1, 1)
+    -135.0
     """
     target_azimuth_yaw_degree = math.degrees(math.atan2(target_y, target_x))
 
-    # 0 ~ 360 に正規化（負角度を扱う場合）
-    if target_azimuth_yaw_degree < 0:
-        target_azimuth_yaw_degree += 360.0
-
     return target_azimuth_yaw_degree
 
-def VelocitySpeed(target_x, target_y, target_z):
+def VelocitySpeed(target_x, target_y, target_z,current_z):
     """
     目標座標から速度指令値を計算する。
 
@@ -54,10 +58,10 @@ def VelocitySpeed(target_x, target_y, target_z):
     """
     target_velocity_x = math.sqrt(target_x**2 + target_y**2 + target_z**2) * 100
     target_velocity_y = 0
-    target_velocity_z = target_z * 100 + 500
+    target_velocity_z = (target_z-current_z) * 100 + 500
     return target_velocity_x, target_velocity_y, target_velocity_z
 
-def VelocityControl(target_x, target_y, target_z):
+def VelocityControl(target_x, target_y, target_z,current_z):
     '''
     target_x: 目標x座標
     target_y: 目標y座標
@@ -68,7 +72,7 @@ def VelocityControl(target_x, target_y, target_z):
       velocity_z: 上下方向速度 (500が中立, 0〜1000)
       azimuth_yaw_degree: 目標へのyaw角 (0〜360)    
     '''
-    target_velocity_x, target_velocity_y, target_velocity_z = VelocitySpeed(target_x, target_y, target_z)
+    target_velocity_x, target_velocity_y, target_velocity_z = VelocitySpeed(target_x, target_y, target_z,current_z)
     target_azimuth_yaw_degree = AzimuthControl(target_x, target_y)
     ManualControl(target_velocity_x, target_velocity_y, target_velocity_z, target_azimuth_yaw_degree)
 
