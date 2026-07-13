@@ -138,112 +138,6 @@ def EmergencyProblem(current_state):
 
     return False
 
-class ImuDvlEkf:
-    G = np.array([0.0, 0.0, 9.81])  # NED: 重力はz正方向(下向き)
-
-    def __init__(self, x0=None, P0=None, Q=None, R_dvl=None):
-        self.x = np.zeros(9) if x0 is None else np.asarray(x0, dtype=float)
-        self.P = np.eye(9) * 0.1 if P0 is None else np.asarray(P0, dtype=float)
-
-        # プロセスノイズ(IMUのノイズ特性に応じて要チューニング)
-        self.Q = np.diag([
-            1e-4, 1e-4, 1e-4,   # 位置
-            1e-5, 1e-5, 1e-5,   # 姿勢
-            1e-3, 1e-3, 1e-3,   # 速度
-        ]) if Q is None else np.asarray(Q, dtype=float)
-
-        # 観測ノイズ(DVLの位置精度に応じて要チューニング)
-        self.R_dvl = np.diag([0.05, 0.05, 0.08]) ** 2 if R_dvl is None else np.asarray(R_dvl, dtype=float)
-
-    # ---------- 運動学モデル ----------
-    @staticmethod
-    def _euler_rate_matrix(roll, pitch):
-        """機体角速度[p,q,r] -> オイラー角速度[roll_dot,pitch_dot,yaw_dot]
-        pitch=±90degで特異点(ジンバルロック)。フルレンジの姿勢変化が
-        想定される場合はクォータニオン状態への変更を検討してください。
-        """
-        cr, sr = np.cos(roll), np.sin(roll)
-        cp, tp = np.cos(pitch), np.tan(pitch)
-        return np.array([
-            [1.0, sr * tp, cr * tp],
-            [0.0, cr, -sr],
-            [0.0, sr / cp, cr / cp],
-        ])
-
-    @staticmethod
-    def _rotation_matrix(roll, pitch, yaw):
-        """機体座標系 -> world座標系 (R = Rz(yaw) Ry(pitch) Rx(roll))"""
-        cr, sr = np.cos(roll), np.sin(roll)
-        cp, sp = np.cos(pitch), np.sin(pitch)
-        cy, sy = np.cos(yaw), np.sin(yaw)
-        Rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
-        Ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
-        Rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
-        return Rz @ Ry @ Rx
-
-    def _f(self, x, imu_data, dt):
-        """状態遷移関数 f(x, u, dt) -> x_next"""
-        p, euler, v = x[0:3], x[3:6], x[6:9]
-        accel_b, omega_b = imu_data[0:3], imu_data[3:6]
-
-        R = self._rotation_matrix(*euler)
-        Wr = self._euler_rate_matrix(euler[0], euler[1])
-
-        p_next = p + v * dt
-        euler_next = euler + (Wr @ omega_b) * dt
-        a_world = R @ accel_b + self.G
-        v_next = v + a_world * dt
-
-        return np.concatenate([p_next, euler_next, v_next])
-
-    def _jacobian_f(self, x, imu_data, dt, eps=1e-6):
-        """中心差分によるヤコビアン F = df/dx (9x9)"""
-        n = len(x)
-        F = np.zeros((n, n))
-        for i in range(n):
-            dx = np.zeros(n)
-            dx[i] = eps
-            F[:, i] = (self._f(x + dx, imu_data, dt) - self._f(x - dx, imu_data, dt)) / (2 * eps)
-        return F
-
-    @staticmethod
-    def _wrap_angles(x):
-        x[3:6] = (x[3:6] + np.pi) % (2 * np.pi) - np.pi
-        return x
-
-    # ---------- 予測ステップ(IMU) ----------
-    def predict(self, imu_data, dt):
-        """imu_data: [ax, ay, az, gx, gy, gz] (get_imu_data()の出力そのまま)"""
-        imu_data = np.asarray(imu_data, dtype=float)
-        if dt <= 0.0:
-            return  # 初回呼び出し等、dtが取れない場合は予測をスキップ
-
-        F = self._jacobian_f(self.x, imu_data, dt)
-        self.x = self._wrap_angles(self._f(self.x, imu_data, dt))
-        self.P = F @ self.P @ F.T + self.Q * dt
-
-    # ---------- 更新ステップ(DVL) ----------
-    def update_dvl(self, dvl_data):
-        """dvl_data: [x, y, z] (get_dvl_data()の出力そのまま、位置観測)"""
-        z = np.asarray(dvl_data[:3], dtype=float)
-        H = np.zeros((3, 9))
-        H[0:3, 0:3] = np.eye(3)
-
-        y = z - H @ self.x
-        S = H @ self.P @ H.T + self.R_dvl
-        K = self.P @ H.T @ np.linalg.inv(S)
-
-        self.x = self._wrap_angles(self.x + K @ y)
-        self.P = (np.eye(9) - K @ H) @ self.P
-
-    def get_state(self):
-        """[x, y, z, roll, pitch, yaw, vx, vy, vz]"""
-        return self.x.copy()
-
-    def get_covariance(self):
-        """収束判定(確信度)に使う共分散行列"""
-        return self.P.copy()
-
 
 # ---------- センサ取得(元コードのバグ修正版) ----------
 def get_acceleration_data():
@@ -258,42 +152,53 @@ def get_position_data():
 
 def get_sensor_data():
     def get_imu_data():
-        # return [ax, ay, az, gx, gy, gz](m/s^2, rad/s)
-        imu_data = np.zeros(6)
-        imu_data[:3] = get_acceleration_data()
-        imu_data[3:] = get_gyro_data()
+        # u[0] = [ax, ay, az](m/s^2), u[1] = [gx, gy, gz](rad/s)
+        accel = get_acceleration_data()
+        gyro = get_gyro_data()
+        return np.array([accel, gyro])  # shape (2,3)
 
-        return imu_data
+    DVL_COVARIANCE_BODY = np.diag([0.02, 0.02, 0.03]) ** 2  # DVLスペックシートから設定
 
     def get_dvl_data():
-        # return [x, y, z](m)
-        dvl_data = np.zeros(3)
-        dvl_data[:3] = get_position_data()
-
-        return dvl_data
+        # return (velocity_body(3,), covariance(3,3)) / 信号途絶時は (None, None)
+        v_body = get_velocity_data()
+        return v_body, DVL_COVARIANCE_BODY
 
     return get_imu_data(), get_dvl_data()
 
 
 # ---------- 状態推定(EKFを使った実装) ----------
-_ekf = ImuDvlEkf()
+
+_qekf = QEKF(x_0, dx_0, P_0, std_a, std_gyro, std_dvl, std_depth,
+             std_orientation, std_a_bias, std_gyro_bias,
+             dvl_offset, barometer_offset, imu_offset)
 _last_time = None
 
 def state_estimation():
     global _last_time
-    imu_data, dvl_data = get_sensor_data()
+    imu_data, (dvl_v, dvl_cov) = get_sensor_data()
+    depth = get_depth_data()
 
     now = time.time()
     dt = 0.0 if _last_time is None else now - _last_time
     _last_time = now
+    if dt <= 0.0:
+        return _qekf.get_state()
 
-    _ekf.predict(imu_data, dt)
+    _qekf.predict(imu_data, dt)
+    _qekf.integrate(imu_data, dt)
 
-    if dvl_data is not None:
-        _ekf.update_dvl(dvl_data)
+    if dvl_v is not None:
+        _qekf.update_dvl(dvl_v, dvl_cov)
+        _qekf.inject()
+        _qekf.reset()
 
-    current_state = _ekf.get_state()
-    return current_state
+    if depth is not None:
+        _qekf.update_depth(depth)
+        _qekf.inject()
+        _qekf.reset()
+
+    return _qekf.get_state()
 
 
 def AzimuthControl(target_x, target_y):
@@ -341,20 +246,23 @@ def VelocityControl(target_x, target_y, target_z,current_z):
     ManualControl(target_velocity_x, target_velocity_y, target_velocity_z, target_azimuth_yaw_degree)
     return target_velocity_x, target_velocity_y, target_velocity_z, target_azimuth_yaw_degree
 
+def get_target_position():
+    # return [x, y, z](m)
+    return [0, 0, 0]
+
+
 
 # def pi_Control():
 #     attitude_control()
 #     velocity_control()
 Flag = True
 while Flag:
+    current_state = state_estimation()
     if EmergencyProblem(current_state):
         Flag = False
         break
     # 目標位置取得用の関数->[x, y, z](m)
     target_position = get_target_position()
-    # 目標速度取得用の関数->[x, y, z](m/s)
-    target_velocity = get_target_velocity()
-    current_state = state_estimation()
 
     VelocityControl(target_position[0], target_position[1], target_position[2], current_state[2])
 
