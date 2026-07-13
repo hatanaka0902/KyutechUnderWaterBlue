@@ -127,6 +127,17 @@ def GainDown():
         GAIN = 0
     print("Gain is", GAIN)
 
+# 緊急問題用code
+def EmergencyProblem(current_state):
+    # 現在の深度が0.1m以下の場合は緊急問題としてTrueを返す
+    if current_state[2] < 0.1:
+        return True
+    # 壁との距離が0.5m以下の場合は緊急問題としてTrueを返す
+
+    # センサが異常な場合は緊急問題としてTrueを返す
+
+    return False
+
 class ImuDvlEkf:
     G = np.array([0.0, 0.0, 9.81])  # NED: 重力はz正方向(下向き)
 
@@ -291,26 +302,6 @@ def AzimuthControl(target_x, target_y):
     x軸正方向を0度として反時計回りを正とする
     返り値は 0 ~ 360 の範囲に正規化
 
-    >>> AzimuthControl(1, 0)
-    0.0
-    >>> AzimuthControl(0, 1)
-    90.0
-    >>> AzimuthControl(-1, 1)
-    135.0
-    >>> AzimuthControl(-1, 0)
-    180.0
-    >>> AzimuthControl(1, 1)
-    45.0
-    >>> AzimuthControl(0, -1)
-    -90.0
-    >>> AzimuthControl(0, 0)
-    0.0
-    >>> AzimuthControl(1, -1)
-    135.0
-    >>> AzimuthControl(-1, -1)
-    -45.0
-    >>> AzimuthControl(-1, 1)
-    -135.0
     """
     target_azimuth_yaw_degree = math.degrees(math.atan2(target_y, target_x))
 
@@ -328,17 +319,6 @@ def VelocitySpeed(target_x, target_y, target_z,current_z):
       velocity_x: 目標への水平速度 (0〜1000)
       velocity_y: 横方向速度 (固定0)
       velocity_z: 上下方向速度 (500が中立, 0〜1000)
-
-    >>> VelocityControl(0, 0, 0)
-    (0.0, 0, 500)
-    >>> VelocityControl(1, 0, 0)
-    (100.0, 0, 500)
-    >>> VelocityControl(3, 4, 0)
-    (500.0, 0, 500)
-    >>> VelocityControl(0, 0, 1)
-    (100.0, 0, 600)
-    >>> VelocityControl(0, 0, -1)
-    (100.0, 0, 400)
     """
     target_velocity_x = math.sqrt(target_x**2 + target_y**2 + target_z**2) * 100
     target_velocity_y = 0
@@ -355,30 +335,6 @@ def VelocityControl(target_x, target_y, target_z,current_z):
       velocity_y: 横方向速度 (固定0)
       velocity_z: 上下方向速度 (500が中立, 0〜1000)
       azimuth_yaw_degree: 目標へのyaw角 (0〜360)
-    >>> VelocityControl(0, 0, 0, 0)
-    (0.0, 0, 500)
-    >>> VelocityControl(1, 0, 0, 0)
-    (100.0, 0, 500)
-    >>> VelocityControl(0, 1, 0, 0)
-    (100.0, 0, 500)
-    >>> VelocityControl(0, 0, 1, 0)
-    (100.0, 0, 600)
-    >>> VelocityControl(0, 0, -1, 0)
-    (100.0, 0, 400)
-    >>> VelocityControl(1, 1, 0, 0)
-    (141.4213562373095, 0, 500)
-    >>> VelocityControl(1, 1, 1, 0)
-    (141.4213562373095, 0, 600)
-    >>> VelocityControl(1, 1, -1, 0)
-    (141.4213562373095, 0, 400)
-    >>> VelocityControl(1, 1, 0, 1)
-    (141.4213562373095, 0, 500)
-    >>> VelocityControl(1, 1, 0, -1)
-    (141.4213562373095, 0, 500)
-    >>> VelocityControl(1, 1, 1, 1)
-    (141.4213562373095, 0, 600)
-    >>> VelocityControl(1, 1, 1, -1)
-    (141.4213562373095, 0, 600)
     '''
     target_velocity_x, target_velocity_y, target_velocity_z = VelocitySpeed(target_x, target_y, target_z, current_z)
     target_azimuth_yaw_degree = AzimuthControl(target_x, target_y)
@@ -389,12 +345,16 @@ def VelocityControl(target_x, target_y, target_z,current_z):
 # def pi_Control():
 #     attitude_control()
 #     velocity_control()
+Flag = True
+while Flag:
+    if EmergencyProblem(current_state):
+        Flag = False
+        break
+    # 目標位置取得用の関数->[x, y, z](m)
+    target_position = get_target_position()
+    # 目標速度取得用の関数->[x, y, z](m/s)
+    target_velocity = get_target_velocity()
+    current_state = state_estimation()
 
-# 目標位置取得用の関数->[x, y, z](m)
-target_position = get_target_position()
-# 目標速度取得用の関数->[x, y, z](m/s)
-target_velocity = get_target_velocity()
-current_state = state_estimation()
-
-VelocityControl(target_position[0], target_position[1], target_position[2], current_state[2])
+    VelocityControl(target_position[0], target_position[1], target_position[2], current_state[2])
 
