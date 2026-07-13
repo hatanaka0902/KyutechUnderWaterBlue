@@ -3,6 +3,8 @@ from pymavlink import mavutil
 import sys
 import time
 import keyboard
+import csv
+import datetime
 
 # Start a connection listening on a UDP port
 BLUEROV = mavutil.mavlink_connection('udpin:192.168.2.1:14550')
@@ -119,44 +121,6 @@ def GainDown():
     print("Gain is", GAIN)
 
 
-# # フライトモード変更
-# ChangeMode("MANUAL")
-# 制御権取得
-Arm()
-# カメラチルト
-CameraTilt(45*100)
-time.sleep(0.5)
-CameraTilt(-45*100)
-time.sleep(0.5)
-CameraTilt(0*100)
-time.sleep(0.5)
-# LED点灯
-for brightness in range(1100, 1900, 10):
-    SetPwm(7, brightness)
-    time.sleep(0.01)
-for brightness in range(1900, 1100, -10):
-    SetPwm(7, brightness)
-    time.sleep(0.01)
-# グリッパー開閉
-SetPwm(11, 1900)
-time.sleep(2)
-SetPwm(11, 1100)
-time.sleep(2)
-# 前進
-ManualControl(200, 0, 500, 0)
-time.sleep(1)
-# 後進
-ManualControl(-200, 0, 500, 0)
-time.sleep(1)
-# 浮上
-ManualControl(0, 0, 700, 0)
-time.sleep(1)
-# 潜水
-ManualControl(0, 0, 300, 0)
-time.sleep(1)
-# 停止
-ManualControl(0, 0, 500, 0)
-
 def AzimuthControl(target_x, target_y):
     """
     目標座標 (target_x, target_y) へのyaw角を返す（度）
@@ -252,11 +216,157 @@ def VelocityControl(target_x, target_y, target_z,current_z):
     >>> VelocityControl(1, 1, 1, -1)
     (141.4213562373095, 0, 600)
     '''
-    target_velocity_x, target_velocity_y, target_velocity_z = VelocitySpeed(target_x, target_y, target_z,current_z)
+    target_velocity_x, target_velocity_y, target_velocity_z = VelocitySpeed(target_x, target_y, target_z, current_z)
     target_azimuth_yaw_degree = AzimuthControl(target_x, target_y)
     ManualControl(target_velocity_x, target_velocity_y, target_velocity_z, target_azimuth_yaw_degree)
-    return 0
+    return target_velocity_x, target_velocity_y, target_velocity_z, target_azimuth_yaw_degree
 
-if __name__ == '__main__':
-    import doctest
-    doctest.testmod()
+
+VIRTUAL_MAX_SPEED = 0.3  # m/s（指令1000のときの想定速度）
+LOOP_DT = 1.0
+
+
+def compute_virtual_delta(cmd_x, cmd_y, cmd_z, heading_deg, dt=LOOP_DT):
+    """MANUAL_CONTROL指令から仮想移動量 [m] を推定する。"""
+    speed_x = (cmd_x / 1000.0) * VIRTUAL_MAX_SPEED
+    speed_y = (cmd_y / 1000.0) * VIRTUAL_MAX_SPEED
+    speed_z = ((cmd_z - 500) / 500.0) * VIRTUAL_MAX_SPEED
+    heading = math.radians(heading_deg)
+    dx = (speed_x * math.cos(heading) - speed_y * math.sin(heading)) * dt
+    dy = (speed_x * math.sin(heading) + speed_y * math.cos(heading)) * dt
+    dz = speed_z * dt
+    return dx, dy, dz
+
+
+def compute_displacement(x, y, z, start_x, start_y, start_z):
+    """開始点からの移動量 [m] を返す。"""
+    dx = x - start_x
+    dy = y - start_y
+    dz = z - start_z
+    horizontal = math.sqrt(dx**2 + dy**2)
+    total = math.sqrt(dx**2 + dy**2 + dz**2)
+    return dx, dy, dz, horizontal, total
+
+# # フライトモード変更
+# ChangeMode("MANUAL")
+# 制御権取得
+Arm()
+# カメラチルト
+CameraTilt(45*100)
+time.sleep(0.5)
+CameraTilt(-45*100)
+time.sleep(0.5)
+CameraTilt(0*100)
+time.sleep(0.5)
+# LED点灯
+for brightness in range(1100, 1900, 10):
+    SetPwm(7, brightness)
+    time.sleep(0.01)
+for brightness in range(1900, 1100, -10):
+    SetPwm(7, brightness)
+    time.sleep(0.01)
+# グリッパー開閉
+SetPwm(11, 1900)
+time.sleep(2)
+SetPwm(11, 1100)
+time.sleep(2)
+# 前進
+ManualControl(200, 0, 500, 0)
+time.sleep(1)
+# 後進
+ManualControl(-200, 0, 500, 0)
+time.sleep(1)
+# 浮上
+ManualControl(0, 0, 700, 0)
+time.sleep(1)
+# 潜水
+ManualControl(0, 0, 300, 0)
+time.sleep(1)
+# 停止
+ManualControl(0, 0, 500, 0)
+
+
+# if __name__ == '__main__':
+#     import doctest
+#     doctest.testmod()
+
+target_x = 100
+target_y = 100
+target_z = 100
+current_z = 0.0
+current_yaw = 0.0
+
+virtual_x = 0.0
+virtual_y = 0.0
+virtual_z = 0.0
+start_x = 0.0
+start_y = 0.0
+start_z = 0.0
+start_initialized = False
+
+log_file = open("rov_movement_log.csv", "w", newline="", encoding="utf-8")
+writer = csv.writer(log_file)
+writer.writerow([
+    "timestamp",
+    "cmd_x", "cmd_y", "cmd_z", "cmd_yaw",
+    "virtual_x", "virtual_y", "virtual_z",
+    "virtual_dx", "virtual_dy", "virtual_dz",
+    "virtual_horizontal_m", "virtual_total_m",
+    "real_x", "real_y", "real_z", "real_total_m",
+])
+
+try:
+    while True:
+        cmd_x, cmd_y, cmd_z, cmd_yaw = VelocityControl(
+            target_x, target_y, target_z, current_z)
+
+        delta_x, delta_y, delta_z = compute_virtual_delta(cmd_x, cmd_y, cmd_z, cmd_yaw)
+        virtual_x += delta_x
+        virtual_y += delta_y
+        virtual_z += delta_z
+
+        vdx, vdy, vdz, virtual_horizontal, virtual_total = compute_displacement(
+            virtual_x, virtual_y, virtual_z, start_x, start_y, start_z)
+
+        pos_msg = BLUEROV.recv_match(type='LOCAL_POSITION_NED', blocking=False)
+        real_x = real_y = real_z = real_total = None
+        if pos_msg:
+            real_x = pos_msg.x
+            real_y = pos_msg.y
+            real_z = pos_msg.z
+            current_z = real_z
+            if not start_initialized:
+                start_x, start_y, start_z = real_x, real_y, real_z
+                start_initialized = True
+            _, _, _, _, real_total = compute_displacement(
+                real_x, real_y, real_z, start_x, start_y, start_z)
+
+        att_msg = BLUEROV.recv_match(type='ATTITUDE', blocking=False)
+        if att_msg:
+            current_yaw = math.degrees(att_msg.yaw)
+
+        writer.writerow([
+            datetime.datetime.now().isoformat(),
+            cmd_x, cmd_y, cmd_z, cmd_yaw,
+            virtual_x, virtual_y, virtual_z,
+            vdx, vdy, vdz,
+            virtual_horizontal, virtual_total,
+            real_x, real_y, real_z, real_total,
+        ])
+        log_file.flush()
+
+        print(
+            f"仮想移動: dx={vdx:.2f} dy={vdy:.2f} dz={vdz:.2f}m | "
+            f"水平={virtual_horizontal:.2f}m 合計={virtual_total:.2f}m",
+            end="",
+        )
+        if real_total is not None:
+            print(f" | 実測合計={real_total:.2f}m")
+        else:
+            print(" | 実測=未取得")
+
+        time.sleep(LOOP_DT)
+except KeyboardInterrupt:
+    print("\n停止")
+finally:
+    log_file.close()
