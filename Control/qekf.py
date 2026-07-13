@@ -1,18 +1,23 @@
+import os
+import sys
+
 import numpy as np
 from numpy.linalg import inv
 from numpy.linalg import norm
-import sys
-sys.path.append('utility_functions')
+
+# 同一ディレクトリの utility_functions を確実に import する
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import utility_functions
 
+
 class QEKF:
-    def __init__(self, x_0, dx_0, P_0, std_a, std_gyro, std_dvl, std_depth, std_orientation, std_a_bias, std_gyro_bias, 
+    def __init__(self, x_0, dx_0, P_0, std_a, std_gyro, std_dvl, std_depth, std_orientation, std_a_bias, std_gyro_bias,
                  dvl_offset, barometer_offset, imu_offset):
         """Initialization of the QEKF
 
         Args:
             x_0                 (19 list) : Initial values of nominal state
-            dx_0             (18 ndarray) : Initial values of error-state  
+            dx_0             (18 ndarray) : Initial values of error-state
             P_0             (18x18 array) : Initial covariance of error-state
             std_a                         : Accelerometer Gaussian noise
             std_gyro                      : Gyrometer Gaussian noise
@@ -25,9 +30,11 @@ class QEKF:
             barometer_offset  (3 ndarray) : Offset value for barometer placement on ROV
             imu_offset        (3 ndarray) : Offset value for IMU placement on ROV
             """
-        
+
         # Resetting filter to initialization values
-        self.filter_reset(x_0, dx_0, P_0, std_gyro, std_a, std_dvl, std_depth, std_orientation, std_gyro_bias, std_a_bias)
+        self.filter_reset(
+            x_0, dx_0, P_0, std_gyro, std_a, std_dvl, std_depth, std_orientation, std_a_bias, std_gyro_bias
+        )
 
         # Defining offset values and previous IMU input (to be used accounting for offset)
         self.dvl_offset = np.array(dvl_offset).reshape(-1,1)
@@ -41,13 +48,12 @@ class QEKF:
         self.file_dir_name = ""
         self.NIS_writer = None
 
-    def filter_reset(self, x_0, dx_0, P_0, std_gyro, std_a, std_dvl, std_depth, 
-                                             std_orientation, std_a_bias, std_gyro_bias):
+    def filter_reset(self, x_0, dx_0, P_0, std_gyro, std_a, std_dvl, std_depth, std_orientation, std_a_bias, std_gyro_bias):
         """Resetting filter to initialization values
 
         Args:
             x_0                 (19 list) : Initial starting point of nominal state
-            dx_0             (18 ndarray) : Initial starting point of error-state  
+            dx_0             (18 ndarray) : Initial starting point of error-state
             P_0             (18x18 array) : Initial covariance of error-state
             std_a                         : Accelerometer Gaussian noise
             std_gyro                      : Gyrometer Gaussian noise
@@ -56,7 +62,7 @@ class QEKF:
             std_orientation               : Orientation estimate BNO055 Gaussian noise
             std_a_bias                    : Accelerometer bias
             std_gyro_bias                 : Gyrometer bias"""
-        
+
         # Initializing nominal state, error-state (mean zero) and covariance
         self.x = np.array(x_0).reshape(-1,1)
         self.dx = dx_0
@@ -115,7 +121,7 @@ class QEKF:
             dx_hat  (k ndarray) : Propagated error-state
             P_hat   (mxm array) : Propagated covariances
             """
-        
+
         #Propagate the state using equation (268)
         q = self.x[6:10]
         R = utility_functions.quaternion_to_rotation_matrix(q)
@@ -138,7 +144,7 @@ class QEKF:
                         [zero,  zero,   zero,                                                   I,      zero,   zero],
                         [zero,  zero,   zero,                                                   zero,   I,      zero],
                         [zero,  zero,   zero,                                                   zero,   zero,   I]])
-        
+
         #Propagate the uncertainty using equation (269)
         std_a = self.std_a
         std_g = self.std_gyro
@@ -151,7 +157,7 @@ class QEKF:
         # Jacobian wrt. the perturbation vectors following equation (271)
         F_i = np.zeros((18,12))
         F_i[3:15] = np.eye(12)
-    
+
         P_hat = F_x@self.P@F_x.T + F_i@Q_i@F_i.T
 
         self.P = P_hat
@@ -167,23 +173,23 @@ class QEKF:
         H_x[:,6:10] = np.eye(4)
 
         V = np.eye(4) * (self.std_orientation**2)
-        
+
         Q_dtheta = (1/2)*np.array([[-q_x,   -q_y,   -q_z],
                                    [q_w,    -q_z,   q_y],
                                    [q_z,    q_w,    -q_x],
                                    [-q_y,   q_x,    q_w]]) # Equation (281)
-        
+
         # Forming X_dx following equation (280)
         X_dx = np.zeros((19,18))
         X_dx[:6,:6] = np.eye(6)
         X_dx[6:10,6:9] = Q_dtheta
         X_dx[10:19,9:18] = np.eye(9)
-        
+
         H = H_x@X_dx
 
         innovation = np.array([[(q[0]-q_w)[0]],[(q[1]-q_x)[0]],[(q[2]-q_y)[0]],[(q[3]-q_z)[0]]])
         K = self.P@H.T@inv(H@self.P@H.T + V)
-        
+
         # Correcting state and covariance according to equations (275) and (276)
         self.dx = K@innovation
         self.P = (np.eye(18) - K@H)@self.P@(np.eye(18) - K@H).T + K@V@K.T
@@ -199,7 +205,7 @@ class QEKF:
         """Runs correction step of QEKF
 
         Args:
-            depth_measurement_raw  : Incoming depth measurement from the barometer (corresponding to x[2])                       
+            depth_measurement_raw  : Incoming depth measurement from the barometer (corresponding to x[2])
         Returns:
             dx_hat  (19x1 ndarray) : Corrected state
             P_hat    (18x18 array) : Corrected covariances
@@ -221,23 +227,23 @@ class QEKF:
         H_x[0,9] = (2*(q_x*self.barometer_offset[0] + q_y*self.barometer_offset[1] + q_z*self.barometer_offset[2]))
 
         V = self.std_depth**2
-        
+
         Q_dtheta = (1/2)*np.array([[-q_x,   -q_y,   -q_z],
                                    [q_w,    -q_z,   q_y],
                                    [q_z,    q_w,    -q_x],
                                    [-q_y,   q_x,    q_w]]) # Equation (281)
-        
+
         # Forming X_dx following equation (280)
         X_dx = np.zeros((19,18))
         X_dx[:6,:6] = np.eye(6)
         X_dx[6:10,6:9] = Q_dtheta
         X_dx[10:19,9:18] = np.eye(9)
-        
+
         H = H_x@X_dx
 
         innovation = depth_measurement_corrected - self.x[2]
         K = self.P@H.T*inv(H@self.P@H.T + V)
-        
+
         # Correcting state and covariance according to equations (275) and (276)
         self.dx = K*innovation
         self.P = (np.eye(18) - K@H)@self.P@(np.eye(18) - K@H).T + V*K@K.T
@@ -284,7 +290,7 @@ class QEKF:
         X_dx[:6,:6] = np.eye(6)
         X_dx[6:10,6:9] = Q_dtheta
         X_dx[10:19,9:18] = np.eye(9) # Equation (280)
-        
+
         H = H_x@X_dx
 
         innovation = dvl_measurement_corrected_NED - self.x[3:5]
@@ -292,7 +298,7 @@ class QEKF:
 
         # Correcting state and covariance according to equations (275) and (276)
         self.dx = K@innovation
-        
+
         #self.P = (np.eye(18) - K@H)@self.P
         self.P = (np.eye(18) - K@H)@self.P@(np.eye(18) - K@H).T + K@dvl_covariance_NED@K.T
 
@@ -314,7 +320,7 @@ class QEKF:
             """
 
         q_dtheta = utility_functions.rotation_vector_to_quaternion(self.dx[6:9], norm(self.dx[6:9]))
-        
+
         self.x[0:3] += self.dx[0:3]
         self.x[3:6] += self.dx[3:6]
         self.x[6:10] = utility_functions.quaternion_product(self.x[6:10], q_dtheta)
@@ -345,3 +351,25 @@ class QEKF:
         self.P = G@self.P@G.T
 
         return self.dx, self.P
+
+    def get_state(self):
+        """公称状態ベクトルを 1D 配列で返す。
+        [px, py, pz, vx, vy, vz, qw, qx, qy, qz, abx, aby, abz, gbx, gby, gbz, gx, gy, gz]
+        """
+        return self.x.flatten().copy()
+
+    def get_position(self):
+        """位置 [px, py, pz] (NED)"""
+        return self.x[0:3].flatten().copy()
+
+    def get_velocity(self):
+        """速度 [vx, vy, vz] (NED)"""
+        return self.x[3:6].flatten().copy()
+
+    def get_quaternion(self):
+        """姿勢クォータニオン [qw, qx, qy, qz]"""
+        return self.x[6:10].flatten().copy()
+
+    def get_covariance(self):
+        """誤差状態の共分散行列 (18x18)"""
+        return self.P.copy()

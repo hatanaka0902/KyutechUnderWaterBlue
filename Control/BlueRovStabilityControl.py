@@ -1,5 +1,6 @@
 import math
 from pymavlink import mavutil
+import os
 import sys
 import time
 import numpy as np
@@ -7,11 +8,73 @@ import keyboard
 import csv
 import datetime
 
+# 同一ディレクトリの QEKF / utility_functions を import
+_CONTROL_DIR = os.path.dirname(os.path.abspath(__file__))
+if _CONTROL_DIR not in sys.path:
+    sys.path.insert(0, _CONTROL_DIR)
+
+from qekf import QEKF
+import utility_functions
+
+
+# ---------- QEKF 初期パラメータ (実機キャリブレーション後に要チューニング) ----------
+# 公称状態 x: [p(3), v(3), q(4), a_bias(3), gyro_bias(3), g(3)] = 19
+_X0 = [
+    0.0, 0.0, 0.0,          # position (NED) [m]
+    0.0, 0.0, 0.0,          # velocity (NED) [m/s]
+    1.0, 0.0, 0.0, 0.0,     # quaternion [qw, qx, qy, qz]
+    0.0, 0.0, 0.0,          # accel bias
+    0.0, 0.0, 0.0,          # gyro bias
+    0.0, 0.0, 9.81,         # gravity (NED, z下向き)
+]
+_DX0 = np.zeros((18, 1))
+_P0 = np.eye(18) * 0.1
+
+_STD_A = 0.1               # m/s^2
+_STD_GYRO = 0.01           # rad/s
+_STD_DVL = 0.02            # m/s
+_STD_DEPTH = 0.05          # m
+_STD_ORIENTATION = 0.01    # quaternion units
+_STD_A_BIAS = 1e-4
+_STD_GYRO_BIAS = 1e-5
+
+_DVL_OFFSET = np.zeros(3)
+_BAROMETER_OFFSET = np.zeros(3)
+_IMU_OFFSET = np.zeros(3)
+
+
+def create_qekf(
+    x_0=None, dx_0=None, P_0=None,
+    std_a=None, std_gyro=None, std_dvl=None, std_depth=None,
+    std_orientation=None, std_a_bias=None, std_gyro_bias=None,
+    dvl_offset=None, barometer_offset=None, imu_offset=None,
+):
+    """QEKF インスタンスを生成して返す。引数省略時はモジュール既定値を使用。"""
+    return QEKF(
+        x_0 if x_0 is not None else _X0,
+        dx_0 if dx_0 is not None else _DX0.copy(),
+        P_0 if P_0 is not None else _P0.copy(),
+        std_a if std_a is not None else _STD_A,
+        std_gyro if std_gyro is not None else _STD_GYRO,
+        std_dvl if std_dvl is not None else _STD_DVL,
+        std_depth if std_depth is not None else _STD_DEPTH,
+        std_orientation if std_orientation is not None else _STD_ORIENTATION,
+        std_a_bias if std_a_bias is not None else _STD_A_BIAS,
+        std_gyro_bias if std_gyro_bias is not None else _STD_GYRO_BIAS,
+        dvl_offset if dvl_offset is not None else _DVL_OFFSET,
+        barometer_offset if barometer_offset is not None else _BAROMETER_OFFSET,
+        imu_offset if imu_offset is not None else _IMU_OFFSET,
+    )
+
+
 # 初期化用の関数
-def initialize():
-    ## キャリブレーション用のcode
-    ## センサデータ取得用の関数を初期化
-    return 0
+def initialize(qekf=None):
+    """キャリブレーション・フィルタ初期化。qekf 未指定時は既定パラメータで生成。"""
+    global _qekf, _last_time
+    _qekf = qekf if qekf is not None else create_qekf()
+    _last_time = None
+    return _qekf
+
 
 # Start a connection listening on a UDP port
 BLUEROV = mavutil.mavlink_connection('udpin:192.168.2.1:14550')
@@ -139,47 +202,59 @@ def EmergencyProblem(current_state):
     return False
 
 
-# ---------- センサ取得(元コードのバグ修正版) ----------
+# ---------- センサ取得 (実センサ読み出しに置き換え) ----------
 def get_acceleration_data():
-    raise NotImplementedError  # 実センサ読み出しに置き換え
+    """比力 [ax, ay, az] (m/s^2, body)"""
+    raise NotImplementedError
 
 def get_gyro_data():
+    """角速度 [gx, gy, gz] (rad/s, body)"""
+    raise NotImplementedError
+
+def get_velocity_data():
+    """DVL対地速度 [vx, vy, vz] (m/s, body)。途絶時は None"""
+    raise NotImplementedError
+
+def get_depth_data():
+    """気圧深度 [m] (NED z)。途絶時は None"""
     raise NotImplementedError
 
 def get_position_data():
+    """位置観測用スタブ (現状QEKFはDVL速度更新を使用)"""
     raise NotImplementedError
-# ----------------------------------------------------
+
 
 def get_sensor_data():
-    def get_imu_data():
-        # u[0] = [ax, ay, az](m/s^2), u[1] = [gx, gy, gz](rad/s)
-        accel = get_acceleration_data()
-        gyro = get_gyro_data()
-        return np.array([accel, gyro])  # shape (2,3)
+    """IMU + DVL を取得し、QEKF 入力形式で返す。
 
-    DVL_COVARIANCE_BODY = np.diag([0.02, 0.02, 0.03]) ** 2  # DVLスペックシートから設定
+    Returns:
+        imu_data: shape (2, 3) — [accel(3,), gyro(3,)]
+        dvl: (v_body, R) — v_body は shape (3,), R は (3,3)。途絶時は (None, None)
+    """
+    accel = np.asarray(get_acceleration_data(), dtype=float).flatten()
+    gyro = np.asarray(get_gyro_data(), dtype=float).flatten()
+    imu_data = np.vstack([accel, gyro])  # shape (2, 3)
 
-    def get_dvl_data():
-        # return (velocity_body(3,), covariance(3,3)) / 信号途絶時は (None, None)
-        v_body = get_velocity_data()
-        return v_body, DVL_COVARIANCE_BODY
+    DVL_COVARIANCE_BODY = np.diag([0.02, 0.02, 0.03]) ** 2
+    v_body = get_velocity_data()
+    if v_body is None:
+        return imu_data, (None, None)
+    v_body = np.asarray(v_body, dtype=float).reshape(3, 1)
+    return imu_data, (v_body, DVL_COVARIANCE_BODY)
 
-    return get_imu_data(), get_dvl_data()
 
-
-# ---------- 状態推定(EKFを使った実装) ----------
-
-_qekf = QEKF(x_0, dx_0, P_0, std_a, std_gyro, std_dvl, std_depth,
-             std_orientation, std_a_bias, std_gyro_bias,
-             dvl_offset, barometer_offset, imu_offset)
+# ---------- 状態推定 (QEKF) ----------
+_qekf = create_qekf()
 _last_time = None
 
+
 def state_estimation():
+    """IMU予測 + DVL/深度更新で状態を推定し、公称状態(19,)を返す。"""
     global _last_time
     imu_data, (dvl_v, dvl_cov) = get_sensor_data()
     depth = get_depth_data()
 
-    now = time.time()
+    now = time.time()  # TODO: センサヘッダ or 同期済みクロックに置き換え
     dt = 0.0 if _last_time is None else now - _last_time
     _last_time = now
     if dt <= 0.0:
@@ -255,14 +330,24 @@ def get_target_position():
 # def pi_Control():
 #     attitude_control()
 #     velocity_control()
-Flag = True
-while Flag:
-    current_state = state_estimation()
-    if EmergencyProblem(current_state):
-        Flag = False
-        break
-    # 目標位置取得用の関数->[x, y, z](m)
-    target_position = get_target_position()
 
-    VelocityControl(target_position[0], target_position[1], target_position[2], current_state[2])
+
+def run_control_loop():
+    """安定制御メインループ。緊急時に抜ける。"""
+    Flag = True
+    while Flag:
+        current_state = state_estimation()
+        if EmergencyProblem(current_state):
+            Flag = False
+            break
+        target_position = get_target_position()
+        # current_state[2] = pz (深度, NED)
+        VelocityControl(
+            target_position[0], target_position[1], target_position[2], current_state[2]
+        )
+
+
+if __name__ == "__main__":
+    initialize()
+    run_control_loop()
 
