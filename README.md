@@ -13,9 +13,10 @@ https://github.com/bjornrho/Navigation-brov2/tree/main
 モジュール間の依存方向(左が右に依存されうる):
 
 ```
-params.py, common.py, qekf.py, utility_functions.py   (最下層・相互依存なし)
-        ↓                    ↓
-function.py (params, qekf)  pid.py (common)     mavlink_io.py (params)
+params.py, common.py, qekf.py, utility_functions.py, imu_stream.py   (最下層・相互依存なし)
+        ↓                              ↓
+function.py (params, qekf,  pid.py (common)     mavlink_io.py (params)
+    utility_functions, imu_stream)
         ↓                        ↓                     ↓
         └──────────── controlfunction.py (params, common, function, pid, mavlink_io, utility_functions) ──────────┘
                               ↓
@@ -45,16 +46,23 @@ QEKF初期パラメータ、到達判定閾値(`POSITION_TOLERANCE`/`DEPTH_TOLER
 | `reset()` | 積分項・前回誤差・前回出力をクリア | なし |
 
 ### function.py — センサ取得〜状態推定
+モジュール読み込み時に`_qekf = create_qekf()`と並べて`_imu_stream = ImuStream()` / `_imu_stream.start()`を実行し、
+IMU受信用TCPサーバをバックグラウンドで起動する。
+
 | 関数 | 役割 | 依存 |
 |---|---|---|
 | `create_qekf(...)` | `QEKF` インスタンス生成(省略時は `params.py` の初期値) | `qekf.QEKF`, `params` |
 | `initialize(qekf=None)` | フィルタ初期化、モジュール変数 `_qekf`/`_last_time` をリセット | `create_qekf` |
-| `get_acceleration_data()` | 加速度取得(**未実装スタブ**) | なし |
-| `get_gyro_data()` | 角速度取得(**未実装スタブ**) | なし |
-| `get_velocity_data()` | DVL対地速度取得(**未実装スタブ**、途絶時は`None`を返す想定) | なし |
+| `get_acceleration_data()` | 比力 [ax,ay,az] (m/s^2, body) を`ImuStream`から取得。途絶時は`RuntimeError` | `imu_stream.ImuStream` |
+| `get_gyro_data()` | 角速度 [gx,gy,gz] (rad/s, body) を`ImuStream`から取得。途絶時は`RuntimeError` | `imu_stream.ImuStream` |
+| `get_depth_data()` | 気圧深度 [m] (NED z) 取得(**未実装スタブ**)。DVEXTの`altitude`(底面までの距離)とは別物 | なし |
 | `get_position_data()` | 位置取得用スタブ(**未実装**。現状QEKFはDVL速度更新のみ使用しており未使用) | なし |
+| `parse_dvext(sentence)` | `$DVEXT`のNMEA文字列をパース(チェックサム検証込み)、dictまたはNoneを返す | なし |
+| `get_latest_dvext()` | DVL-75からの最新`$DVEXT`文字列を受信して`parse_dvext()`に通す(**未実装スタブ**、シリアル/Ethernet受信部) | なし |
+| `get_velocity_data()` | DVL対地速度を機体座標系で返す。DVLロスト時は`None` | `get_latest_dvext`, `utility_functions.quaternion_to_rotation_matrix` |
+| `get_orientation_measurement()` | BNO08xのクォータニオンを`QEKF.update_orientation()`用に返す。取得不可なら`None` | `imu_stream.ImuStream` |
 | `get_sensor_data()` | IMU+DVLをQEKF入力形式にまとめる | 上記 `get_acceleration_data`/`get_gyro_data`/`get_velocity_data` |
-| `state_estimation()` | predict→integrate→DVL更新→inject→resetを1周期実行し公称状態を返す(気圧/深度更新は削除済み・DVL速度更新のみ) | `get_sensor_data`, `common.clamp`, `params.MAX_DT`, `qekf.QEKF` |
+| `state_estimation()` | predict→integrate→DVL更新→姿勢更新→深度更新(各々inject→reset)を1周期実行し公称状態を返す | `get_sensor_data`, `get_orientation_measurement`, `get_depth_data`, `common.clamp`, `params.MAX_DT`, `qekf.QEKF` |
 | `get_last_dt()` | 直近の`state_estimation()`で使われた`dt`を返す(`controlfunction.py`のPIDループでの再利用用) | なし |
 | `get_last_imu_data()` | 直近の`state_estimation()`で使われたIMU生データ(shape (2,3))を返す | なし |
 
@@ -102,12 +110,27 @@ QEKF初期パラメータ、到達判定閾値(`POSITION_TOLERANCE`/`DEPTH_TOLER
 | `__init__` / `filter_reset` | 公称状態・誤差状態・共分散・ノイズパラメータの初期化 |
 | `integrate(u, dt)` | IMU入力を公称状態(位置・速度・姿勢)に積分 |
 | `predict(u, dt)` | 誤差状態の共分散を伝播 |
-| `update_orientation(q)` | 姿勢観測による補正(**現状呼び出し元なし**) |
-| `update_depth(depth)` | 深度観測による補正(**現状呼び出し元なし**、`function.py`から気圧/深度パイプラインは削除済み) |
+| `update_orientation(q)` | 姿勢観測による補正(`function.state_estimation()`から毎周期呼ばれる) |
+| `update_depth(depth)` | 深度観測による補正(`function.state_estimation()`から毎周期呼ばれる) |
 | `update_dvl(v, cov)` | DVL速度観測による補正(`function.state_estimation()`から毎周期呼ばれる) |
 | `inject()` | 誤差状態を公称状態へ反映 |
 | `reset()` | 誤差状態・共分散をリセット |
 | `get_state` / `get_position` / `get_velocity` / `get_quaternion` / `get_covariance` | 状態取得用アクセサ |
+
+### imu_stream.py — IMUストリーム受信
+Adafruit BNO08x搭載ESP32(`IMU_CALIB_AND_REC.ino`)からTCP経由でIMUデータを受信するモジュール。このモジュールがサーバとして
+ESP32からの接続を待ち受け、接続確立後に`"MEASURE"`コマンドを送ってCSV形式(Ax,Ay,Az,Gx,Gy,Gz,Mx,My,Mz,Qx,Qy,Qz,Qw、
+末尾`\n`)のデータ行送信を開始させる。受信はバックグラウンドスレッドで行い、直近値をロックで保護しつつ保持する
+(制御ループから`get_latest()`で毎周期ポーリングする用途)。姿勢クォータニオンはESP32側`Qx,Qy,Qz,Qw`の順序から
+QEKFが使う`[qw,qx,qy,qz]`の順に並べ替えて保持する。ESP32の送信は姿勢推定(`SH2_ROTATION_VECTOR`)イベント発火時のみ
+行われるため、姿勢推定が止まるとIMUデータ全体(加速度・角速度含む)が途絶する点に注意。
+
+| メソッド | 役割 | 依存 |
+|---|---|---|
+| `ImuStream(listen_ip="0.0.0.0", listen_port=5007, stale_timeout=0.5)` | 待受アドレス・鮮度タイムアウトの設定 | なし |
+| `start()` | バックグラウンドスレッドでTCPサーバを起動し、ESP32の接続を待つ | `socket`, `threading` |
+| `stop()` | サーバを停止 | なし |
+| `get_latest()` | 直近のIMU値を`dict`(`accel`/`gyro`/`mag`/`quat`)で返す。`stale_timeout`を超えて更新が無ければ`None` | なし |
 
 ### utility_functions.py — クォータニオン/回転演算(変更なし・純粋関数)
 | 関数 | 役割 |
