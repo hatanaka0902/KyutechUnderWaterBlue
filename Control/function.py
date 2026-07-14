@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 import time
@@ -10,6 +11,7 @@ if _CONTROL_DIR not in sys.path:
     sys.path.insert(0, _CONTROL_DIR)
 
 from qekf import QEKF
+import utility_functions
 
 from params import (
     _X0, _DX0, _P0,
@@ -19,8 +21,10 @@ from params import (
     MAX_DT,
 )
 from common import clamp
+from imu_stream import ImuStream
 
 
+# ---------- QEKF 初期化 ----------
 def create_qekf(
     x_0=None, dx_0=None, P_0=None,
     std_a=None, std_gyro=None, std_dvl=None, std_depth=None,
@@ -57,41 +61,32 @@ def initialize(qekf=None):
 # ---------- センサ取得 (実センサ読み出しに置き換え) ----------
 def get_acceleration_data():
     """比力 [ax, ay, az] (m/s^2, body)"""
-    raise NotImplementedError
+    latest = _imu_stream.get_latest()
+    if latest is None:
+        raise RuntimeError("IMUストリームが未接続、または途絶しています")
+    return latest["accel"]
+
 
 def get_gyro_data():
     """角速度 [gx, gy, gz] (rad/s, body)"""
+    latest = _imu_stream.get_latest()
+    if latest is None:
+        raise RuntimeError("IMUストリームが未接続、または途絶しています")
+    return latest["gyro"]
+
+
+def get_depth_data():
+    """気圧深度 [m] (NED z)。途絶時は None。DVEXTのAltitudeとは別物
+    (Altitudeは底面までの距離であり深度ではない)"""
     raise NotImplementedError
 
-def get_velocity_data():
-    """DVL対地速度 [vx, vy, vz] (m/s, body)。途絶時は None"""
-    raise NotImplementedError
 
 def get_position_data():
     """位置観測用スタブ (現状QEKFはDVL速度更新を使用)"""
     raise NotImplementedError
 
 
-def get_sensor_data():
-    """IMU + DVL を取得し、QEKF 入力形式で返す。
-
-    Returns:
-        imu_data: shape (2, 3) — [accel(3,), gyro(3,)]
-        dvl: (v_body, R) — v_body は shape (3,), R は (3,3)。途絶時は (None, None)
-    """
-    accel = np.asarray(get_acceleration_data(), dtype=float).flatten()
-    gyro = np.asarray(get_gyro_data(), dtype=float).flatten()
-    imu_data = np.vstack([accel, gyro])  # shape (2, 3)
-
-    DVL_COVARIANCE_BODY = np.diag([0.02, 0.02, 0.03]) ** 2
-    v_body = get_velocity_data()
-    if v_body is None:
-        return imu_data, (None, None)
-    v_body = np.asarray(v_body, dtype=float).reshape(3, 1)
-    return imu_data, (v_body, DVL_COVARIANCE_BODY)
-
-import math
-
+# ---------- DVL-75 ($DVEXT) ----------
 def parse_dvext(sentence):
     """
     $DVEXT NMEA文字列をパースする。
@@ -141,14 +136,6 @@ def get_latest_dvext():
     raise NotImplementedError  # シリアル/Ethernet受信部分を実装
 
 
-def get_orientation_measurement():
-    """DVEXTのクォータニオンをQEKF.update_orientation()用に返す。取得不可ならNone"""
-    dvext = get_latest_dvext()
-    if dvext is None or not dvext['dvl_lock']:
-        return None
-    return np.array([[dvext['qw']], [dvext['qx']], [dvext['qy']], [dvext['qz']]])
-
-
 def get_velocity_data():
     """DVL対地速度を機体座標系で返す。DVLロスト時はNone"""
     dvext = get_latest_dvext()
@@ -160,13 +147,43 @@ def get_velocity_data():
     R = utility_functions.quaternion_to_rotation_matrix(q_dvext)  # body -> world
     return R.T @ v_world  # world -> body
 
+
+def get_orientation_measurement():
+    """BNO08xのクォータニオンをQEKF.update_orientation()用に返す。取得不可ならNone"""
+    latest = _imu_stream.get_latest()
+    if latest is None:
+        return None
+    return latest["quat"].reshape(4, 1)
+
+
+def get_sensor_data():
+    """IMU + DVL を取得し、QEKF 入力形式で返す。
+
+    Returns:
+        imu_data: shape (2, 3) — [accel(3,), gyro(3,)]
+        dvl: (v_body, R) — v_body は shape (3,), R は (3,3)。途絶時は (None, None)
+    """
+    accel = np.asarray(get_acceleration_data(), dtype=float).flatten()
+    gyro = np.asarray(get_gyro_data(), dtype=float).flatten()
+    imu_data = np.vstack([accel, gyro])  # shape (2, 3)
+
+    DVL_COVARIANCE_BODY = np.diag([0.02, 0.02, 0.03]) ** 2
+    v_body = get_velocity_data()
+    if v_body is None:
+        return imu_data, (None, None)
+    v_body = np.asarray(v_body, dtype=float).reshape(3, 1)
+    return imu_data, (v_body, DVL_COVARIANCE_BODY)
+
+
 # ---------- 状態推定 (QEKF) ----------
 _qekf = create_qekf()
+_imu_stream = ImuStream()
+_imu_stream.start()
 _last_time = None
 
 
 def state_estimation():
-    """IMU予測 + DVL更新で状態を推定し、公称状態(19,)を返す。"""
+    """IMU予測 + DVL/姿勢/深度更新で状態を推定し、公称状態(19,)を返す。"""
     global _last_time, _last_dt, _last_imu_data
     imu_data, (dvl_v, dvl_cov) = get_sensor_data()
     _last_imu_data = imu_data
@@ -185,13 +202,19 @@ def state_estimation():
     _qekf.integrate(imu_data, dt)
 
     if dvl_v is not None:
-            _qekf.update_dvl(dvl_v, dvl_cov)
-            _qekf.inject()
-            _qekf.reset()
+        _qekf.update_dvl(dvl_v, dvl_cov)
+        _qekf.inject()
+        _qekf.reset()
 
     q_meas = get_orientation_measurement()
     if q_meas is not None:
         _qekf.update_orientation(q_meas)
+        _qekf.inject()
+        _qekf.reset()
+
+    depth = get_depth_data()
+    if depth is not None:
+        _qekf.update_depth(depth)
         _qekf.inject()
         _qekf.reset()
 
