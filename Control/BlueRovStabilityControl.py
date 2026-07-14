@@ -282,17 +282,18 @@ def normalize_deg(angle):
 YAW_KP = 15.0        # 旋回レートPゲイン(実機で要チューニング)
 YAW_RATE_MAX = 1000  # ManualControlのr(yaw)フィールドの飽和値
 
-def YawRateControl(target_azimuth_deg):
+def YawRateControl(target_azimuth_deg, current_yaw_deg):
     """目標方位角と現在yawの差から、旋回レート指令(-1000〜1000)を返す"""
-    yaw_error_deg = normalize_deg(target_azimuth_deg)
+    yaw_error_deg = normalize_deg(target_azimuth_deg - current_yaw_deg)
     r_cmd = YAW_KP * yaw_error_deg
     return max(-YAW_RATE_MAX, min(YAW_RATE_MAX, r_cmd))
+
+    
 def AzimuthControl(target_x, target_y):
     """
     目標座標 (target_x, target_y) へのyaw角を返す（度）
     x軸正方向を0度として反時計回りを正とする
-    返り値は 0 ~ 360 の範囲に正規化
-
+    返り値は -180〜180 の範囲（math.atan2 の結果）
     """
     target_azimuth_yaw_degree = math.degrees(math.atan2(target_y, target_x))
 
@@ -325,16 +326,17 @@ def VelocityControl(target_x, target_y, target_z, current_z):
       velocity_x: 目標への水平速度 (0〜1000)
       velocity_y: 横方向速度 (固定0)
       velocity_z: 上下方向速度 (500が中立, 0〜1000)
-      azimuth_yaw_degree: 目標へのyaw角 (0〜360)
+      azimuth_yaw_degree: 目標へのyaw角 (-180〜180)
     '''
     target_velocity_x, target_velocity_y, target_velocity_z = VelocitySpeed(target_x, target_y, target_z)
     target_azimuth_yaw_degree = AzimuthControl(target_x, target_y)
-    yaw_rate_cmd = YawRateControl(target_azimuth_yaw_degree)
+    yaw_rate_cmd = YawRateControl(target_azimuth_yaw_degree, current_yaw_deg)
     ManualControl(target_velocity_x, target_velocity_y, target_velocity_z, yaw_rate_cmd)
     return target_velocity_x, target_velocity_y, target_velocity_z, yaw_rate_cmd
 
+
 def get_target_position():
-    # return [x, y, z](m) 絶対座標(NED)
+    # return [dx, dy, dz](m) 現在位置からのオフセット(NED)
     return [0, 0, 0]
 
 
@@ -360,7 +362,7 @@ def run_control_loop():
 
         _, _, current_yaw_rad = utility_functions.quaternion_to_euler(current_state[6:10])
         current_yaw_deg = math.degrees(current_yaw_rad)
-        VelocityControl(target_x, target_y, target_z, current_state[2])
+        VelocityControl(target_x, target_y, target_z, current_yaw_deg)
 
 
 
