@@ -90,6 +90,75 @@ def get_sensor_data():
     v_body = np.asarray(v_body, dtype=float).reshape(3, 1)
     return imu_data, (v_body, DVL_COVARIANCE_BODY)
 
+import math
+
+def parse_dvext(sentence):
+    """
+    $DVEXT NMEA文字列をパースする。
+    Args:
+        sentence: '$DVEXT,...*hh' 形式の文字列
+    Returns:
+        dict。フォーマット不正・チェックサム不正なら None
+    """
+    sentence = sentence.strip()
+    if not sentence.startswith('$DVEXT') or '*' not in sentence:
+        return None
+
+    body, _, checksum_str = sentence.partition('*')
+    payload = body[1:]  # 先頭の '$' を除く
+
+    calc_checksum = 0
+    for ch in payload:
+        calc_checksum ^= ord(ch)
+    try:
+        if calc_checksum != int(checksum_str[:2], 16):
+            return None
+    except ValueError:
+        return None
+
+    f = payload.split(',')
+    try:
+        return {
+            'dvl_lock': f[1] == 'T',
+            'imu_cal': f[3],              # 'abcd', 例 '3333'
+            'roll_deg': float(f[4]),
+            'pitch_deg': float(f[5]),
+            'heading_deg': float(f[6]),
+            'vel_up': float(f[8]),        # m/s, 正=上
+            'altitude': float(f[9]),      # m, 底面までの距離(深度ではない)
+            'vel_north': float(f[10]),    # m/s, world系
+            'vel_east': float(f[11]),     # m/s, world系
+            'elapsed_time': float(f[14]), # DVL内部EKFの前回ステップからの経過秒
+            'qw': float(f[15]), 'qx': float(f[16]),
+            'qy': float(f[17]), 'qz': float(f[18]),
+        }
+    except (IndexError, ValueError):
+        return None
+
+
+def get_latest_dvext():
+    """DVL-75からの最新$DVEXT文字列を受信してparse_dvext()に通す"""
+    raise NotImplementedError  # シリアル/Ethernet受信部分を実装
+
+
+def get_orientation_measurement():
+    """DVEXTのクォータニオンをQEKF.update_orientation()用に返す。取得不可ならNone"""
+    dvext = get_latest_dvext()
+    if dvext is None or not dvext['dvl_lock']:
+        return None
+    return np.array([[dvext['qw']], [dvext['qx']], [dvext['qy']], [dvext['qz']]])
+
+
+def get_velocity_data():
+    """DVL対地速度を機体座標系で返す。DVLロスト時はNone"""
+    dvext = get_latest_dvext()
+    if dvext is None or not dvext['dvl_lock']:
+        return None
+
+    v_world = np.array([dvext['vel_north'], dvext['vel_east'], -dvext['vel_up']])  # NED
+    q_dvext = np.array([dvext['qw'], dvext['qx'], dvext['qy'], dvext['qz']])
+    R = utility_functions.quaternion_to_rotation_matrix(q_dvext)  # body -> world
+    return R.T @ v_world  # world -> body
 
 # ---------- 状態推定 (QEKF) ----------
 _qekf = create_qekf()
@@ -116,7 +185,13 @@ def state_estimation():
     _qekf.integrate(imu_data, dt)
 
     if dvl_v is not None:
-        _qekf.update_dvl(dvl_v, dvl_cov)
+            _qekf.update_dvl(dvl_v, dvl_cov)
+            _qekf.inject()
+            _qekf.reset()
+
+    q_meas = get_orientation_measurement()
+    if q_meas is not None:
+        _qekf.update_orientation(q_meas)
         _qekf.inject()
         _qekf.reset()
 
