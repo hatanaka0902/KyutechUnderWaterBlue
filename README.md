@@ -142,6 +142,34 @@ QEKFが使う`[qw,qx,qy,qz]`の順に並べ替えて保持する。ESP32の送�
 | `rotation_vector_to_quaternion(vector, angle)` | 回転ベクトル→クォータニオン(指数写像) |
 | `rodrigues(omega, angle)` | Rodriguesの回転公式による回転行列 |
 
+## test/ — 単体テスト・実機デモ
+
+`Control/`内の各ファイルに対応する`test_*.py`が1つずつあり、それぞれ次の2種類のコードを含む。
+
+- **単体テスト(実機不要)**: `python test/test_xxx.py` で実行。MAVLink/ESP32/DVL-75への実接続部分は
+  フェイクに差し替えるか値を直接注入し、ロジックのみを検証する。
+- **実機デモ**: `python test/test_xxx.py --hardware` で実行(スラスタ等を実際に動かすものは
+  実行前に `y/N` の確認プロンプトを出し、Ctrl+Cや終了時には必ず`ManualControl(0,0,500,0)`+`Disarm()`
+  で安全停止する)。`mavlink_io.py`/`function.py`/`controlfunction.py`/`main.py`にのみ用意されている
+  (`params.py`/`common.py`/`pid.py`/`utility_functions.py`/`qekf.py`/`imu_stream.py`はMAVLinkに触れない
+  純粋ロジックのため単体テストのみ)。
+
+| テストファイル | 対象 | 実機デモの内容 |
+|---|---|---|
+| `test_common.py` | `common.py` | (実機デモ無し) |
+| `test_pid.py` | `pid.py` | (実機デモ無し) |
+| `test_utility_functions.py` | `utility_functions.py` | (実機デモ無し) |
+| `test_qekf.py` | `qekf.py` | (実機デモ無し) |
+| `test_params.py` | `params.py` | (実機デモ無し) |
+| `test_imu_stream.py` | `imu_stream.py` | (実機デモ無し。ESP32の代わりにlocalhostのTCPクライアントで検証) |
+| `test_mavlink_io.py` | `mavlink_io.py` | Arm→カメラチルト→前後進→Disarmを実機で確認 |
+| `test_function.py` | `function.py` | state_estimation()を一定時間読み取り表示(スラスタは動かさない) |
+| `test_controlfunction.py` | `controlfunction.py` | 仮の目標オフセットに対しカスケードPIDで実際にManualControlを送信 |
+| `test_main.py` | `main.py` | main.pyと同じ呼び出し順序を一定時間で強制終了しつつ実行 |
+
+`test/_hw_helpers.py`は上記テストが共通で使う実機安全確認・フェイクMAVLink接続ヘルパー
+(テストケース自体は含まないため`test_*.py`という命名ではない)。
+
 ### BlueRovSpeedControl.py — 旧プロトタイプ(手動キーボード操縦スクリプト)
 `controlfunction.py`のカスケードPID制御とは別系統で、PID/QEKFを使わない独立した手動操縦デモ。`Arm`→カメラチルト/LED/
 グリッパー/前後上下移動のデモ動作→WASD+矢印キーによるキーボード操縦ループ(`keyboard`パッケージ使用)、という構成。

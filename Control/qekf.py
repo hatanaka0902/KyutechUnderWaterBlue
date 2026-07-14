@@ -218,13 +218,16 @@ class QEKF:
 
         # Defining the Jacobian H and the depth covariance V
         q_w,q_x,q_y,q_z = self.x[6:10].T[0]
+        # barometer_offsetは(3,1)なので、[0]等で取り出すと(1,)配列になり、新しいnumpyでは
+        # スカラースロットへの代入がエラーになる。flatten()で真のスカラーに揃える。
+        b_x, b_y, b_z = self.barometer_offset.flatten()
 
         H_x = np.zeros((1,19))
         H_x[0,2] = 1
-        H_x[0,6] = (2*(q_y*self.barometer_offset[0] - q_x*self.barometer_offset[1] + q_w*self.barometer_offset[2]))
-        H_x[0,7] = (2*(q_z*self.barometer_offset[0] - q_w*self.barometer_offset[1] - q_x*self.barometer_offset[2]))
-        H_x[0,8] = (2*(q_w*self.barometer_offset[0] + q_z*self.barometer_offset[1] - q_y*self.barometer_offset[2]))
-        H_x[0,9] = (2*(q_x*self.barometer_offset[0] + q_y*self.barometer_offset[1] + q_z*self.barometer_offset[2]))
+        H_x[0,6] = (2*(q_y*b_x - q_x*b_y + q_w*b_z))
+        H_x[0,7] = (2*(q_z*b_x - q_w*b_y - q_x*b_z))
+        H_x[0,8] = (2*(q_w*b_x + q_z*b_y - q_y*b_z))
+        H_x[0,9] = (2*(q_x*b_x + q_y*b_y + q_z*b_z))
 
         V = self.std_depth**2
 
