@@ -67,10 +67,6 @@ def get_velocity_data():
     """DVL対地速度 [vx, vy, vz] (m/s, body)。途絶時は None"""
     raise NotImplementedError
 
-def get_depth_data():
-    """気圧深度 [m] (NED z)。途絶時は None"""
-    raise NotImplementedError
-
 def get_position_data():
     """位置観測用スタブ (現状QEKFはDVL速度更新を使用)"""
     raise NotImplementedError
@@ -101,11 +97,10 @@ _last_time = None
 
 
 def state_estimation():
-    """IMU予測 + DVL/深度更新で状態を推定し、公称状態(19,)を返す。"""
+    """IMU予測 + DVL更新で状態を推定し、公称状態(19,)を返す。"""
     global _last_time
     imu_data, (dvl_v, dvl_cov) = get_sensor_data()
-    now = time.time()  # IMU取得直後に計測(depth待ちの影響を受けないようにする)
-    depth = get_depth_data()
+    now = time.time()
 
     if _last_time is None:
         _last_time = now
@@ -119,11 +114,6 @@ def state_estimation():
 
     if dvl_v is not None:
         _qekf.update_dvl(dvl_v, dvl_cov)
-        _qekf.inject()
-        _qekf.reset()
-
-    if depth is not None:
-        _qekf.update_depth(depth)
         _qekf.inject()
         _qekf.reset()
 
