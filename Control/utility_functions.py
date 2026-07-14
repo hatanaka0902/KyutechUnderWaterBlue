@@ -19,6 +19,14 @@ def cross(v):
         [-v[1],  v[0],  0.0],
     ])
 
+def quaternion_to_euler(q):
+    """クォータニオン[qw,qx,qy,qz] -> (roll, pitch, yaw) [rad], ZYX順"""
+    q = np.asarray(q).flatten()
+    qw, qx, qy, qz = q
+    roll = np.arctan2(2*(qw*qx + qy*qz), 1 - 2*(qx**2 + qy**2))
+    pitch = np.arcsin(np.clip(2*(qw*qy - qz*qx), -1.0, 1.0))
+    yaw = np.arctan2(2*(qw*qz + qx*qy), 1 - 2*(qy**2 + qz**2))
+    return roll, pitch, yaw
 
 def quaternion_to_rotation_matrix(q):
     """クォータニオン q=[qw,qx,qy,qz] -> 回転行列 R (body -> world, 3x3)"""
