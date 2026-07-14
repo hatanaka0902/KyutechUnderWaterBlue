@@ -275,7 +275,18 @@ def state_estimation():
 
     return _qekf.get_state()
 
+def normalize_deg(angle):
+    """角度を -180〜180 度に正規化"""
+    return (angle + 180.0) % 360.0 - 180.0
 
+YAW_KP = 15.0        # 旋回レートPゲイン(実機で要チューニング)
+YAW_RATE_MAX = 1000  # ManualControlのr(yaw)フィールドの飽和値
+
+def YawRateControl(target_azimuth_deg):
+    """目標方位角と現在yawの差から、旋回レート指令(-1000〜1000)を返す"""
+    yaw_error_deg = normalize_deg(target_azimuth_deg)
+    r_cmd = YAW_KP * yaw_error_deg
+    return max(-YAW_RATE_MAX, min(YAW_RATE_MAX, r_cmd))
 def AzimuthControl(target_x, target_y):
     """
     目標座標 (target_x, target_y) へのyaw角を返す（度）
@@ -287,7 +298,7 @@ def AzimuthControl(target_x, target_y):
 
     return target_azimuth_yaw_degree
 
-def VelocitySpeed(target_x, target_y, target_z,current_z):
+def VelocitySpeed(target_x, target_y, target_z):
     """
     目標座標から速度指令値を計算する。
 
@@ -300,12 +311,12 @@ def VelocitySpeed(target_x, target_y, target_z,current_z):
       velocity_y: 横方向速度 (固定0)
       velocity_z: 上下方向速度 (500が中立, 0〜1000)
     """
-    target_velocity_x = math.sqrt(target_x**2 + target_y**2 + target_z**2) * 100
+    target_velocity_x = math.sqrt(target_x**2 + target_y**2) * 100
     target_velocity_y = 0
-    target_velocity_z = (target_z-current_z) * 100 + 500
+    target_velocity_z = -target_z * 100 + 500
     return target_velocity_x, target_velocity_y, target_velocity_z
 
-def VelocityControl(target_x, target_y, target_z,current_z):
+def VelocityControl(target_x, target_y, target_z, current_z):
     '''
     target_x: 目標x座標
     target_y: 目標y座標
@@ -316,38 +327,45 @@ def VelocityControl(target_x, target_y, target_z,current_z):
       velocity_z: 上下方向速度 (500が中立, 0〜1000)
       azimuth_yaw_degree: 目標へのyaw角 (0〜360)
     '''
-    target_velocity_x, target_velocity_y, target_velocity_z = VelocitySpeed(target_x, target_y, target_z, current_z)
+    target_velocity_x, target_velocity_y, target_velocity_z = VelocitySpeed(target_x, target_y, target_z)
     target_azimuth_yaw_degree = AzimuthControl(target_x, target_y)
-    ManualControl(target_velocity_x, target_velocity_y, target_velocity_z, target_azimuth_yaw_degree)
-    return target_velocity_x, target_velocity_y, target_velocity_z, target_azimuth_yaw_degree
+    yaw_rate_cmd = YawRateControl(target_azimuth_yaw_degree)
+    ManualControl(target_velocity_x, target_velocity_y, target_velocity_z, yaw_rate_cmd)
+    return target_velocity_x, target_velocity_y, target_velocity_z, yaw_rate_cmd
 
 def get_target_position():
-    # return [x, y, z](m)
+    # return [x, y, z](m) 絶対座標(NED)
     return [0, 0, 0]
 
 
+def is_target_reached(target_x, target_y, target_z):
+    return math.sqrt(target_x**2 + target_y**2) < POSITION_TOLERANCE and abs(target_z) < DEPTH_TOLERANCE
 
-# def pi_Control():
-#     attitude_control()
-#     velocity_control()
-
+POSITION_TOLERANCE = 0.2  # m, 水平方向の到達とみなす距離
+DEPTH_TOLERANCE = 0.1     # m, 深度方向の到達とみなす距離
 
 def run_control_loop():
-    """安定制御メインループ。緊急時に抜ける。"""
     Flag = True
     while Flag:
         current_state = state_estimation()
         if EmergencyProblem(current_state):
             Flag = False
             break
-        target_position = get_target_position()
-        # current_state[2] = pz (深度, NED)
-        VelocityControl(
-            target_position[0], target_position[1], target_position[2], current_state[2]
-        )
+
+        target_x, target_y, target_z = get_target_position()
+
+        if is_target_reached(target_x, target_y, target_z):
+            ManualControl(0, 0, 500, 0)
+            continue
+
+        _, _, current_yaw_rad = utility_functions.quaternion_to_euler(current_state[6:10])
+        current_yaw_deg = math.degrees(current_yaw_rad)
+        VelocityControl(target_x, target_y, target_z, current_state[2])
+
 
 
 if __name__ == "__main__":
     initialize()
     run_control_loop()
+    ManualControl(0, 0, 300, 0)
 
