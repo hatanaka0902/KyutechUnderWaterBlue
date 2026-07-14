@@ -29,16 +29,6 @@ _BAROMETER_OFFSET = np.zeros(3)
 _IMU_OFFSET = np.zeros(3)
 
 # ---------- 制御ゲイン・閾値 ----------
-# 旧・単段制御用(手順6でカスケードPIDに置き換え後、削除予定)
-# TODO: controlfunction.py の YawRateControl/VelocitySpeed を
-#       カスケードPID(PID_YAW_*, PID_HEAVE_*, PID_SURGE_*)に置き換えたら
-#       この5つは不要になるので削除する
-YAW_KP = 15.0        # 旋回レートPゲイン(実機で要チューニング)
-YAW_RATE_MAX = 1000  # ManualControlのr(yaw)フィールドの飽和値
-
-VEL_XY_MAX = 1000        # ManualControlのx,yフィールドの飽和値(-1000〜1000)
-VEL_Z_MIN, VEL_Z_MAX = 0, 1000  # zフィールドの範囲(500が中立)
-
 POSITION_TOLERANCE = 0.2  # m, 水平方向の到達とみなす距離
 DEPTH_TOLERANCE = 0.1     # m, 深度方向の到達とみなす距離
 

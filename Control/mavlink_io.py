@@ -74,6 +74,13 @@ def SetPwm(channel_id, pwm=1500):
 
 
 def ManualControl(x, y, z, yaw):
+    """
+    MAVLink MANUAL_CONTROL を送信する。
+    x: 前後方向速度 (-1000〜1000, 正=前進)
+    y: 左右方向速度 (-1000〜1000, 正=右)
+    z: 上下方向スロットル (0〜1000, 500が中立。値が小さいほど沈む方向、大きいほど浮上方向)
+    yaw: 旋回レート (-1000〜1000)
+    """
     BLUEROV.mav.manual_control_send(
         BLUEROV.target_system,
         x,

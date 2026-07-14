@@ -14,22 +14,35 @@ https://github.com/bjornrho/Navigation-brov2/tree/main
 
 ```
 params.py, common.py, qekf.py, utility_functions.py   (最下層・相互依存なし)
-        ↓
-function.py (params, qekf)          mavlink_io.py (params, pymavlink)
-        ↓                                    ↓
-        └──────── controlfunction.py (params, common, function, mavlink_io, utility_functions)
+        ↓                    ↓
+function.py (params, qekf)  pid.py (common)     mavlink_io.py (params)
+        ↓                        ↓                     ↓
+        └──────────── controlfunction.py (params, common, function, pid, mavlink_io, utility_functions) ──────────┘
                               ↓
                            main.py (function, controlfunction, mavlink_io)
 ```
 
 ### params.py — 定数のみ
-QEKF初期パラメータ、制御ゲイン・閾値、MAVLink接続文字列。関数なし、他モジュールに依存しない。
+QEKF初期パラメータ、到達判定閾値(`POSITION_TOLERANCE`/`DEPTH_TOLERANCE`/`MAX_DT`)、カスケードPID用ゲイン辞書
+(`PID_{SURGE,HEAVE,YAW}_{OUTER,INNER}`、`pid.PID(**...)`にそのまま渡す形式)、MAVLink接続文字列。関数なし、他モジュールに依存しない。
 
 ### common.py — 汎用ヘルパー
 | 関数 | 役割 | 依存 |
 |---|---|---|
 | `clamp(value, lo, hi)` | 値を `[lo, hi]` にクランプ | なし |
 | `normalize_deg(angle)` | 角度を -180〜180 度に正規化 | なし |
+
+### pid.py — PID制御器
+`common.clamp` にのみ依存。`output_limits`(出力クランプ)、`windup_limit`(積分項アンチワインドアップ用クランプ)、
+`angle_error_deg`(yaw等の角度誤差を-180〜180度に正規化するフラグ)を持つ`PID`クラス。`dt`は毎回外部から渡す(内部で
+`time.time()`を呼ばない)。
+
+| メソッド | 役割 | 依存 |
+|---|---|---|
+| `PID(kp, ki, kd, output_limits=None, windup_limit=None, angle_error_deg=False)` | ゲイン・出力クランプ・アンチワインドアップ・角度正規化の設定、`reset()`呼び出し | `common.clamp` |
+| `update(setpoint, measurement, dt)` | setpoint/measurementから誤差を計算して更新(速度PIDなど) | なし |
+| `update_from_error(error, dt)` | 誤差が上流で計算済みの場合に使用(位置PIDなど) | なし |
+| `reset()` | 積分項・前回誤差・前回出力をクリア | なし |
 
 ### function.py — センサ取得〜状態推定
 | 関数 | 役割 | 依存 |
@@ -38,22 +51,31 @@ QEKF初期パラメータ、制御ゲイン・閾値、MAVLink接続文字列。
 | `initialize(qekf=None)` | フィルタ初期化、モジュール変数 `_qekf`/`_last_time` をリセット | `create_qekf` |
 | `get_acceleration_data()` | 加速度取得(**未実装スタブ**) | なし |
 | `get_gyro_data()` | 角速度取得(**未実装スタブ**) | なし |
-| `get_velocity_data()` | DVL対地速度取得(**未実装スタブ**) | なし |
-| `get_position_data()` | 位置取得用スタブ(**未実装・現状未使用**) | なし |
+| `get_velocity_data()` | DVL対地速度取得(**未実装スタブ**、途絶時は`None`を返す想定) | なし |
+| `get_position_data()` | 位置取得用スタブ(**未実装**。現状QEKFはDVL速度更新のみ使用しており未使用) | なし |
 | `get_sensor_data()` | IMU+DVLをQEKF入力形式にまとめる | 上記 `get_acceleration_data`/`get_gyro_data`/`get_velocity_data` |
-| `state_estimation()` | predict→integrate→DVL更新→inject→resetを1周期実行し公称状態を返す | `get_sensor_data`, `common.clamp`, `params.MAX_DT`, `qekf.QEKF` |
+| `state_estimation()` | predict→integrate→DVL更新→inject→resetを1周期実行し公称状態を返す(気圧/深度更新は削除済み・DVL速度更新のみ) | `get_sensor_data`, `common.clamp`, `params.MAX_DT`, `qekf.QEKF` |
+| `get_last_dt()` | 直近の`state_estimation()`で使われた`dt`を返す(`controlfunction.py`のPIDループでの再利用用) | なし |
+| `get_last_imu_data()` | 直近の`state_estimation()`で使われたIMU生データ(shape (2,3))を返す | なし |
 
-### controlfunction.py — 誘導則・制御ループ
+### controlfunction.py — 誘導則・カスケードPID制御ループ
+外側ループ(位置/yaw誤差→速度setpoint)と内側ループ(速度setpoint→推力/トルク指令)からなるカスケードPID構成。
+モジュール読み込み時に`params.PID_*`辞書から6つの`PID`インスタンス(`_surge_outer_pid`/`_heave_outer_pid`/`_yaw_outer_pid`/
+`_surge_inner_pid`/`_heave_inner_pid`/`_yaw_inner_pid`)を生成する。旧来の単段制御関数(`YawRateControl`/`VelocitySpeed`/
+`VelocityControl`)はこのカスケード構成への移行に伴い削除済み。
+
 | 関数 | 役割 | 依存 |
 |---|---|---|
-| `EmergencyProblem(current_state)` | 緊急停止判定(現状は深度 < 0.1m のみ、壁距離/センサ異常は未実装) | なし |
-| `YawRateControl(target_azimuth_deg, current_yaw_deg)` | 目標方位と現在yawの差から旋回レート指令を算出 | `common.normalize_deg`, `params.YAW_KP`/`YAW_RATE_MAX` |
-| `AzimuthControl(target_x, target_y)` | 目標座標への方位角(度)を算出 | なし |
-| `VelocitySpeed(target_x, target_y, target_z)` | 目標座標から水平・上下速度指令を算出 | `common.clamp`, `params.VEL_XY_MAX`/`VEL_Z_MIN`/`VEL_Z_MAX` |
-| `VelocityControl(target_x, target_y, target_z, current_z)` | 上記をまとめて `ManualControl` を送信(**既知バグ**: 本体が未定義の `current_yaw_deg` を参照し `NameError`) | `VelocitySpeed`, `AzimuthControl`, `YawRateControl`, `mavlink_io.ManualControl` |
-| `get_target_position()` | 目標位置取得(**現状は固定 `[0,0,0]` のスタブ**) | なし |
-| `is_target_reached(target_x, target_y, target_z)` | 目標到達判定 | `params.POSITION_TOLERANCE`/`DEPTH_TOLERANCE` |
-| `run_control_loop()` | メイン制御ループ(状態推定→緊急判定→誘導→速度制御を繰り返す) | `function.state_estimation`, `EmergencyProblem`, `get_target_position`, `is_target_reached`, `VelocityControl`, `mavlink_io.ManualControl`, `utility_functions.quaternion_to_euler` |
+| `EmergencyProblem(current_state)` | 緊急停止判定(現状は深度 `current_state[2]` < 0.1m のみ、壁距離/センサ異常は未実装) | なし |
+| `AzimuthControl(target_x, target_y)` | 目標座標(NED)への方位角[度](-180〜180)を算出 | なし |
+| `OuterLoopControl(dx, dy, dz, current_yaw_deg, dt)` | 位置/yaw誤差から外側ループの速度setpoint(forward speed, NED heave rate, yaw rate)を算出 | `AzimuthControl`, `_surge_outer_pid`/`_heave_outer_pid`/`_yaw_outer_pid` |
+| `get_target_position()` | 目標位置取得(**現状は固定 `[0,0,0]`(NEDオフセット)のスタブ**) | なし |
+| `is_target_reached(target_x, target_y, target_z)` | 目標到達判定(水平距離・深度差がそれぞれ閾値未満か) | `params.POSITION_TOLERANCE`/`DEPTH_TOLERANCE` |
+| `get_body_frame_velocity(current_state)` | QEKFのNED速度を機体座標系に回転 | `utility_functions.quaternion_to_rotation_matrix` |
+| `get_yaw_rate_deg(current_state)` | 生ジャイロ値 - QEKF推定ジャイロバイアスからyawレート[deg/s]を算出 | `function.get_last_imu_data` |
+| `InnerLoopControl(surge_sp, heave_sp, yaw_rate_sp, current_state, dt)` | 外側ループのsetpointと実測値(上記2関数)の誤差から`ManualControl`向けの`(x_cmd, z_cmd_offset, r_cmd)`を算出 | `get_body_frame_velocity`, `get_yaw_rate_deg`, `_surge_inner_pid`/`_heave_inner_pid`/`_yaw_inner_pid` |
+| `reset_all_pids()` | 6つのPIDインスタンスをすべてリセット(目標到達によるホールド突入時などに呼ぶ) | なし |
+| `run_control_loop()` | メイン制御ループ(状態推定→緊急判定→目標到達判定→ホールド or 外側/内側PIDループ→`ManualControl`送信を繰り返す) | `function.state_estimation`/`get_last_dt`, `EmergencyProblem`, `get_target_position`, `is_target_reached`, `OuterLoopControl`, `InnerLoopControl`, `reset_all_pids`, `mavlink_io.ManualControl`, `utility_functions.quaternion_to_euler` |
 
 ### mavlink_io.py — MAVLink低レベルI/O
 モジュール読み込み時に `BLUEROV` 接続を確立し、heartbeatをブロッキング待機(実機/SITL必須)。
@@ -64,12 +86,13 @@ QEKF初期パラメータ、制御ゲイン・閾値、MAVLink接続文字列。
 | `Disarm()` | 機体をディスアーム | `BLUEROV` 接続 |
 | `ChangeMode(mode)` | 操縦モード変更(`MANUAL`/`STABILIZE`/`ALT_HOLD`) | `BLUEROV` 接続 |
 | `SetPwm(channel_id, pwm)` | RCチャンネルPWM出力 | `BLUEROV` 接続 |
-| `ManualControl(x, y, z, yaw)` | 手動操縦指令(前後左右・深度・旋回)を送信 | `BLUEROV` 接続 |
+| `ManualControl(x, y, z, yaw)` | 手動操縦指令を送信。`x`/`y`は-1000〜1000、`z`は0〜1000(500が中立、値が小さいほど沈む方向)、`yaw`は-1000〜1000 | `BLUEROV` 接続 |
 | `CameraTilt(tilt, roll, pan)` | カメラジンバル姿勢制御 | `BLUEROV` 接続 |
-| `GainUp()` / `GainDown()` | 操作ゲイン調整(**既知バグ**: グローバル `GAIN` が未初期化) | なし |
+| `GainUp()` / `GainDown()` | 操作ゲイン調整(**既知バグ**: グローバル `GAIN` が未初期化のため呼ぶと`NameError`) | なし |
 
 ### main.py — エントリポイント
-`mavlink_io` → `function` → `controlfunction` の順にimportし(MAVLink接続を最初に確立)、`initialize()` → `run_control_loop()` を実行。
+`mavlink_io` → `function` → `controlfunction` の順にimportし(MAVLink接続を最初に確立)、`initialize()` → `run_control_loop()`
+→ 停止用`ManualControl`を実行。
 
 ### qekf.py — QEKFクラス
 `utility_functions.py` に依存。誤差状態クォータニオンEKFの本体。
@@ -79,9 +102,9 @@ QEKF初期パラメータ、制御ゲイン・閾値、MAVLink接続文字列。
 | `__init__` / `filter_reset` | 公称状態・誤差状態・共分散・ノイズパラメータの初期化 |
 | `integrate(u, dt)` | IMU入力を公称状態(位置・速度・姿勢)に積分 |
 | `predict(u, dt)` | 誤差状態の共分散を伝播 |
-| `update_orientation(q)` | 姿勢観測による補正 |
-| `update_depth(depth)` | 深度観測による補正 |
-| `update_dvl(v, cov)` | DVL速度観測による補正 |
+| `update_orientation(q)` | 姿勢観測による補正(**現状呼び出し元なし**) |
+| `update_depth(depth)` | 深度観測による補正(**現状呼び出し元なし**、`function.py`から気圧/深度パイプラインは削除済み) |
+| `update_dvl(v, cov)` | DVL速度観測による補正(`function.state_estimation()`から毎周期呼ばれる) |
 | `inject()` | 誤差状態を公称状態へ反映 |
 | `reset()` | 誤差状態・共分散をリセット |
 | `get_state` / `get_position` / `get_velocity` / `get_quaternion` / `get_covariance` | 状態取得用アクセサ |
@@ -96,5 +119,9 @@ QEKF初期パラメータ、制御ゲイン・閾値、MAVLink接続文字列。
 | `rotation_vector_to_quaternion(vector, angle)` | 回転ベクトル→クォータニオン(指数写像) |
 | `rodrigues(omega, angle)` | Rodriguesの回転公式による回転行列 |
 
-### BlueRovSpeedControl.py — 旧プロトタイプ
-全行コメントアウト済み。他モジュールから未使用(参考・履歴用途のみ)。
+### BlueRovSpeedControl.py — 旧プロトタイプ(手動キーボード操縦スクリプト)
+`controlfunction.py`のカスケードPID制御とは別系統で、PID/QEKFを使わない独立した手動操縦デモ。`Arm`→カメラチルト/LED/
+グリッパー/前後上下移動のデモ動作→WASD+矢印キーによるキーボード操縦ループ(`keyboard`パッケージ使用)、という構成。
+モジュール読み込み時に無条件で独自のMAVLink接続(`udpin:192.168.2.2:14550`。末尾が`params.MAVLINK_CONNECTION_STRING`
+と異なる)を確立し、トップレベルのコードが`if __name__`等で保護されずそのまま実行される。他モジュールから未使用
+(参考・履歴用途のみ)。

@@ -98,13 +98,14 @@ _last_time = None
 
 def state_estimation():
     """IMU予測 + DVL更新で状態を推定し、公称状態(19,)を返す。"""
-    global _last_time
+    global _last_time, _last_dt, _last_imu_data
     imu_data, (dvl_v, dvl_cov) = get_sensor_data()
+    _last_imu_data = imu_data
     now = time.time()
 
     if _last_time is None:
         _last_time = now
-        _last_dt = 0.0   
+        _last_dt = 0.0
         return _qekf.get_state()  # 初回はpredictをスキップ
 
     dt = clamp(now - _last_time, 0.0, MAX_DT)  # 負値・異常大値の両方をガード
@@ -126,3 +127,9 @@ _last_dt = 0.0
 def get_last_dt():
     """直近のstate_estimation()呼び出しで使われたdtを返す(PIDループでの再利用用)"""
     return _last_dt
+
+_last_imu_data = None
+
+def get_last_imu_data():
+    """直近のstate_estimation()呼び出しで使われたIMU生データ(shape (2,3))を返す"""
+    return _last_imu_data
