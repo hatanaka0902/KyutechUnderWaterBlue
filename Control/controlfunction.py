@@ -1,8 +1,15 @@
 import math
 import os
 import sys
+from pid import PID
+from params import PID_SURGE_OUTER, PID_HEAVE_OUTER, PID_YAW_OUTER
+from function import get_last_dt
+
 
 # 同一ディレクトリの utility_functions を確実に import する
+_surge_outer_pid = PID(**PID_SURGE_OUTER)
+_heave_outer_pid = PID(**PID_HEAVE_OUTER)
+_yaw_outer_pid = PID(**PID_YAW_OUTER)
 _CONTROL_DIR = os.path.dirname(os.path.abspath(__file__))
 if _CONTROL_DIR not in sys.path:
     sys.path.insert(0, _CONTROL_DIR)
@@ -30,6 +37,32 @@ def EmergencyProblem(current_state):
 
     return False
 
+def OuterLoopControl(dx, dy, dz, current_yaw_deg, dt):
+    """
+    位置/yaw誤差から速度指令(setpoint)を計算する外側ループ。
+
+    Args:
+        dx, dy, dz: 現在位置からの目標オフセット [m] (NED)
+        current_yaw_deg: 現在のyaw角 [deg]
+        dt: state_estimation()と同じdt(get_last_dt()で取得)
+
+    Returns:
+        surge_setpoint      [m/s]:   前進方向の目標速度(常に0以上)
+        heave_setpoint      [m/s]:   深度方向の目標速度(NED, 正=より深く沈む方向)
+        yaw_rate_setpoint   [deg/s]: 目標旋回レート
+        target_azimuth_deg  [deg]:   目標方位角(ログ・デバッグ用)
+    """
+    horizontal_distance = math.sqrt(dx**2 + dy**2)
+    surge_setpoint = _surge_outer_pid.update_from_error(horizontal_distance, dt)
+
+    # NEDのまま(符号反転しない)。ManualControlの500中立表現への変換は内側ループの
+    # 出力を使う最終段(手順5)でのみ行う。ここで反転すると#2と同じ符号バグを再演する。
+    heave_setpoint = _heave_outer_pid.update_from_error(dz, dt)
+
+    target_azimuth_deg = AzimuthControl(dx, dy)
+    yaw_rate_setpoint = _yaw_outer_pid.update(target_azimuth_deg, current_yaw_deg, dt)
+
+    return surge_setpoint, heave_setpoint, yaw_rate_setpoint, target_azimuth_deg
 
 def YawRateControl(target_azimuth_deg, current_yaw_deg):
     """目標方位角と現在yawの差から、旋回レート指令(-1000〜1000)を返す"""

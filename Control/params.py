@@ -29,6 +29,10 @@ _BAROMETER_OFFSET = np.zeros(3)
 _IMU_OFFSET = np.zeros(3)
 
 # ---------- 制御ゲイン・閾値 ----------
+# 旧・単段制御用(手順6でカスケードPIDに置き換え後、削除予定)
+# TODO: controlfunction.py の YawRateControl/VelocitySpeed を
+#       カスケードPID(PID_YAW_*, PID_HEAVE_*, PID_SURGE_*)に置き換えたら
+#       この5つは不要になるので削除する
 YAW_KP = 15.0        # 旋回レートPゲイン(実機で要チューニング)
 YAW_RATE_MAX = 1000  # ManualControlのr(yaw)フィールドの飽和値
 
@@ -39,3 +43,45 @@ POSITION_TOLERANCE = 0.2  # m, 水平方向の到達とみなす距離
 DEPTH_TOLERANCE = 0.1     # m, 深度方向の到達とみなす距離
 
 MAX_DT = 0.5  # s, これを超えるdtは発散防止のためクランプ(要チューニング)
+
+PID_YAW_OUTER = dict(
+    kp=0.5, ki=0.0, kd=0.0,
+    output_limits=(-20.0, 20.0),   # deg/s。初回は控えめな最大旋回速度から
+    windup_limit=40.0,             # Ki=0の間は無効。後でIを入れる時のため仮置き
+    angle_error_deg=True,          # 誤差を-180~180に正規化(角度なので必須)
+)
+
+PID_YAW_INNER = dict(
+    kp=20.0, ki=0.0, kd=0.0,
+    output_limits=(-500.0, 500.0),  # rコマンド。フルレンジ(±1000)よりまず控えめに
+    windup_limit=25.0,
+    angle_error_deg=False,          # 誤差は既にdeg/s(角度ではない)ので正規化不要
+)
+
+PID_HEAVE_OUTER = dict(
+    kp=0.3, ki=0.0, kd=0.0,
+    output_limits=(-0.3, 0.3),      # m/s。小型ROVの初回テストとして控えめな昇降速度
+    windup_limit=0.6,
+    angle_error_deg=False,
+)
+
+PID_HEAVE_INNER = dict(
+    kp=800.0, ki=0.0, kd=0.0,
+    output_limits=(-300.0, 300.0),  # 500中立からのオフセット量(送信時に+500する)
+    windup_limit=0.4,
+    angle_error_deg=False,
+)
+
+PID_SURGE_OUTER = dict(
+    kp=0.15, ki=0.0, kd=0.0,
+    output_limits=(0.0, 0.3),       # m/s。距離は常に0以上なので下限も0
+    windup_limit=0.6,
+    angle_error_deg=False,
+)
+
+PID_SURGE_INNER = dict(
+    kp=1000.0, ki=0.0, kd=0.0,
+    output_limits=(0.0, 400.0),     # xコマンド。初回は後退方向を使わない(0始まり)
+    windup_limit=0.4,
+    angle_error_deg=False,
+)

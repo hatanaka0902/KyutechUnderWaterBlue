@@ -104,10 +104,12 @@ def state_estimation():
 
     if _last_time is None:
         _last_time = now
+        _last_dt = 0.0   
         return _qekf.get_state()  # 初回はpredictをスキップ
 
     dt = clamp(now - _last_time, 0.0, MAX_DT)  # 負値・異常大値の両方をガード
     _last_time = now
+    _last_dt = dt
 
     _qekf.predict(imu_data, dt)
     _qekf.integrate(imu_data, dt)
@@ -118,3 +120,9 @@ def state_estimation():
         _qekf.reset()
 
     return _qekf.get_state()
+
+_last_dt = 0.0
+
+def get_last_dt():
+    """直近のstate_estimation()呼び出しで使われたdtを返す(PIDループでの再利用用)"""
+    return _last_dt
