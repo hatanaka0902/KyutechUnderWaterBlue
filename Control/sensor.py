@@ -134,3 +134,38 @@ class ImuStream:
             if time.time() - self._latest_time > self._stale_timeout:
                 return None
             return self._latest
+def estimate_position_from_imu(imu_dict, dt):
+    """
+    IMU計測値(dict)から自己位置を推定する。
+    DVL(対地速度)・深度による補正は行わない、IMU単独のストラップダウン積分(dead reckoning)。
+
+    Args:
+        imu_dict: ImuStream.get_latest() と同じ形式の dict
+            {
+                "accel": (3,) ndarray [m/s^2], body系, 比力(重力込み)
+                "gyro":  (3,) ndarray [rad/s], body系
+                "mag":   (3,) ndarray [uT], body系 (この処理では未使用)
+                "quat":  (4,) ndarray [qw,qx,qy,qz], 姿勢センサの推定姿勢
+            }
+        dt: 前回呼び出しからの経過時間 [s] (MAX_DTでクランプ済みのものを渡すこと)
+
+    Returns:
+        position: (3,) ndarray, 推定位置 [px, py, pz] (NED) [m]
+    """
+    global _qekf
+
+    accel = np.asarray(imu_dict["accel"], dtype=float).flatten()
+    gyro = np.asarray(imu_dict["gyro"], dtype=float).flatten()
+    imu_data = np.vstack([accel, gyro])  # shape (2,3)、QEKF.predict/integrateの入力形式
+
+    # ① 予測: IMUで公称状態・共分散を dt 分だけ伝搬
+    _qekf.predict(imu_data, dt)
+    _qekf.integrate(imu_data, dt)
+
+    # ② 補正: 姿勢センサ(BNO08x)のクォータニオンで向きのドリフトだけを抑える
+    q_meas = np.asarray(imu_dict["quat"], dtype=float).reshape(4, 1)
+    _qekf.update_orientation(q_meas)
+    _qekf.inject()
+    _qekf.reset()
+
+    return _qekf.get_position()
