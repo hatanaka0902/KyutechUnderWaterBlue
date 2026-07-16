@@ -20,5 +20,5 @@ if __name__ == "__main__":
             Flag = False
             break
         while True!=GetSerachFloatingBall(hydrophone_data_pitch,hydrophone_data_yaw,target_FloatingBall_pitch,target_FloatingBall_yaw):
-            hydrophoneSensorControl(current_state):
+            hydrophoneSensorControl(current_state)
 
