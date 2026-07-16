@@ -1,5 +1,12 @@
-
-
+def initialSetting():
+    """
+    センサデータ保存用のファイル名を設定てん作成する
+    """
+    filename = datetime.now().strftime('%Y%m%d%H%M%S') + '.csv'
+    with open(filename, 'w') as f:
+        writer = csv.writer(f)
+        writer.writerow(['time', 'hydrophone_data_yaw', 'hydrophone_data_pitch'])
+    return filename
 
 def initialControl():
     """
@@ -47,12 +54,32 @@ def GetSerachFloatingBall(hydrophone_data_pitch,hydrophone_data_yaw,target_Float
         return True
     return False
 
-def hydrophoneSensorControl(yaw_angle,pitch_angle):
+
+
+def BingerSearch(pitch_deg, yaw_deg, assumed_distance=BINGER_SEARCH_ASSUMED_DISTANCE):
     """
-    yaw_angle: ハイドロフォンから得られた値のyaw
-    pitch_angle: ハイドロフォンから得られた値のpitch
+    ハイドロフォンの pitch, yaw [deg] から、AUV現在位置を原点とした
+    相対目標座標 (dx, dy, dz) [m, NED] を返す。
+
+    距離は未知のため、assumed_distance [m] を仮定して固定値として扱う
+    (球面座標 -> 直交座標の変換)。
+
+    Args:
+        pitch_deg: 仰角/俯角 [deg]。正 = 対象が下方向にある(NEDのz正方向と対応)。
+        yaw_deg:   水平面内の方位角 [deg]。x軸正方向を0度とし反時計回りが正
+                   (AzimuthControl()のatan2(y, x)と対応する定義)。
+        assumed_distance: 対象までの距離の仮定値 [m]。
+
+    Returns:
+        dx, dy, dz: 現在位置からの目標オフセット [m] (NED)
     """
-    if yaw_angle < target_FloatingBall_yaw and pitch_angle < target_FloatingBall_pitch:
-        return True
-    return False
+    pitch = math.radians(pitch_deg)
+    yaw = math.radians(yaw_deg)
+
+    horizontal_distance = assumed_distance * math.cos(pitch)
+    dx = horizontal_distance * math.cos(yaw)
+    dy = horizontal_distance * math.sin(yaw)
+    dz = assumed_distance * math.sin(pitch)
+
+    return dx, dy, dz
 
