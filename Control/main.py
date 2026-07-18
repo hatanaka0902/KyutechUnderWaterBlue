@@ -3,7 +3,7 @@ from operator import truediv
 from sensor import ImuStream
 
 
-def FlagControl(params):
+def FlagEmergencyControl(params):
     """
     params: 初期化時のパラメータ
     """
@@ -22,26 +22,58 @@ def SensorGetData():
 
 
 if __name__ == "__main__":
-    ini
+
     initial_params =initialControl()
     Now_filename = initialSetting()
     stream = ImuStream()   # function.py ではモジュール読込時に start() 済み
     stream.start()
     latest_imu_data = stream.get_latest()  # dict または None
+    Flag_Emergency = False
+    Flag_Search_Binger = False
+    Flag_Image_Processing = False
+    Binger_Attack = False
+    Flag_Get_Binger = False
+    get_binger_pitch_position = 30
+    Binger_Try_Attack = False
 
-    while Flag:
+
+    while not (Flag_Emergency or Flag_Get_Binger):
+        # 最初にセンサからデータを取得
+        # --------------------------------
         sensor_data = SensorGetData()
+        # データを保存
+        # --------------------------------
         save_sensor_data(sensor_data)
-        if FlagControl(params,sensor_data):
-            Flag = False
+        # 緊急制御のフラグをチェック
+        # --------------------------------
+        if FlagEmergencyControl(params,sensor_data):
+            Flag_Emergency = True
             break
+        # ビンガーの位置を取得
+        # --------------------------------
         hydrophone_data_yaw,hydrophone_data_pitch = hydrophoneSensorControl()
-        if GetSerachFloatingBall(hydrophone_data_pitch,hydrophone_data_yaw,target_FloatingBall_pitch,target_FloatingBall_yaw):
+        if GetSerachFloatingBall(hydrophone_data_pitch,hydrophone_data_yaw,target_FloatingBaller_pitch,target_FloatingBaller_yaw):
            # BlueRovがビンガーに近づいているかのチェック関数
-           GetBinger_Flag = True
+           Flag_Search_Binger = True
 
-        if GetBinger_Flag:
-            target_position_x,target_position_y,target_position_z = BingerSearch(hydrophone_data_pitch,hydrophone_data_yaw,params.assumed_distance)
+        if Flag_Search_Binger and Flag_Image_Processing and not Flag_Get_Binger:
+            # 画像処理が利用できる場合の処理
+            # --------------------------------
+        else:
+            # 画像処理が利用できない場合の処理
 
+        if Binger_Attack:
+            # Binger衝突の処理
+            # --------------------------------
+            # ホバリング
+            # --------------------------------
+            # Bingerの位置がどこかを取得
+            if hydrophone_data_pitch > get_binger_pitch_position:
+            # Bingerが一定時間上にあるかのチェック
+                GetBinger_Flag = True
 
+            else:
+                Binger_Try_Attack = True
+        if Binger_Try_Attack or Flag_Search_Binger:
+        
 
