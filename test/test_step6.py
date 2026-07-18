@@ -1,17 +1,74 @@
 """
 main.run_mission()を、乱数で挙動を変えるスタブを差し込みながら多数回実行し、
 状態遷移グラフに抜け・無限ループが無いかを検証する。
+
+state遷移が起きるたびに、その時点のパラメータをカレントディレクトリの
+yyyy-MM-dd-ss.csv に追記する(デバッグ用)。
 """
 import os
 import sys
+import csv
 import types
 import random
+import datetime
 import time as time_module
 import numpy as np
 
 _CONTROL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Control")
 if _CONTROL_DIR not in sys.path:
     sys.path.insert(0, _CONTROL_DIR)
+
+# ==========================================================
+# state遷移ログ用のCSVライタ
+# ==========================================================
+# ファイル名は起動時刻で1つに固定する(全試行をこの1ファイルに集約)。
+# ss(秒)まで含めても1000試行が一瞬で終わるため試行ごとには分けられない。
+# 代わりにCSV内の seed 列で各試行を区別できるようにしている。
+_CSV_FILENAME = datetime.datetime.now().strftime("%Y-%m-%d-%S") + ".csv"
+_CSV_PATH = os.path.join(os.getcwd(), _CSV_FILENAME)
+_csv_file = None
+_csv_writer = None
+
+
+def _fmt_vec(v):
+    """np.ndarray または None を '0.123 0.456 0.789' 形式の文字列にする(CSVの1セルに収める)"""
+    if v is None:
+        return ""
+    return " ".join(f"{x:.4f}" for x in np.asarray(v).flatten())
+
+
+def init_csv():
+    """CSVを開いてヘッダを書く。プログラム開始時に一度だけ呼ぶ。"""
+    global _csv_file, _csv_writer
+    _csv_file = open(_CSV_PATH, "w", newline="", encoding="utf-8")
+    _csv_writer = csv.writer(_csv_file)
+    _csv_writer.writerow([
+        "seed", "elapsed_time", "from_state", "to_state",
+        "pos_xyz", "target_xyz", "discovered_xyz",
+        "attack_retry_started_at",
+    ])
+    _csv_file.flush()
+
+
+def log_transition(seed, ctx, from_state, to_state):
+    """state遷移が起きたときに1行書く。"""
+    _csv_writer.writerow([
+        seed,
+        f"{ctx.elapsed_time:.3f}",
+        from_state.name if from_state is not None else "",
+        to_state.name if to_state is not None else "",
+        _fmt_vec(ctx.position),
+        _fmt_vec(ctx.target_position),
+        _fmt_vec(ctx.discovered_target),
+        "" if ctx.attack_retry_started_at is None else f"{ctx.attack_retry_started_at:.3f}",
+    ])
+    _csv_file.flush()  # 途中でクラッシュしても書けたところまで残るようにする
+
+
+def close_csv():
+    if _csv_file is not None:
+        _csv_file.close()
+
 
 # ---- センサ/MAVLinkのハードウェア依存部分を差し替える(Step1〜5と同じ理由) ----
 _ctx_ref = {"ctx": None}
@@ -98,14 +155,8 @@ def make_random_stubs(rng):
     return random_hydro_bearing, image_available, random_yolo_detection, random_mic_stub
 
 
-N_TRIALS = 40
-results = {}
-errors = []
-
-for seed in range(N_TRIALS):
-    rng = random.Random(seed)
-
-    # モジュールレベルの永続変数を毎回リセットする(前回の実行結果を引きずらないように)
+def run_one_trial(seed, rng):
+    """1試行を回す。state遷移のたびにCSVへ記録する。最終Stateを返す。"""
     flow._previous_state = None
     controlfunction._was_holding = False
     _tick_guard["n"] = 0
@@ -120,17 +171,57 @@ for seed in range(N_TRIALS):
     ctx = flow.MissionContext()
     _ctx_ref["ctx"] = ctx
 
-    try:
-        import io
-        import contextlib
-        with contextlib.redirect_stdout(io.StringIO()):
-            final_state = main.run_mission(ctx=ctx)
-        results[final_state] = results.get(final_state, 0) + 1
-    except Exception as e:
-        errors.append((seed, type(e).__name__, str(e)))
-        results["EXCEPTION"] = results.get("EXCEPTION", 0) + 1
+    # main.run_mission()をそのまま使うと内部ループに手を入れられないので、
+    # ここでは同等の統合ループを自前で回してstate遷移を捕まえる。
+    # (main.run_mission()の中身と等価。CSVログのためだけに展開している)
+    import time as _t
+    fake_function.initialize()
+    state = flow.State.INIT
+    mission_start = _t.time()
+    tick_period = 1.0 / params.MAIN_LOOP_HZ
 
-time_module.sleep = _real_sleep  # 後片付け
+    # 初期状態も1行残しておく(from=空, to=INIT)
+    log_transition(seed, ctx, None, state)
+
+    try:
+        while state not in (flow.State.DONE, flow.State.EMERGENCY):
+            tick_start = _t.time()
+            ctx.elapsed_time = tick_start - mission_start
+
+            new_state = flow.mission_tick(ctx, state)
+            if new_state != state:
+                log_transition(seed, ctx, state, new_state)
+            state = new_state
+
+            sleep_time = tick_period - (_t.time() - tick_start)
+            if sleep_time > 0:
+                _t.sleep(sleep_time)
+    finally:
+        fake_mavlink_io.ManualControl(0, 0, 500, 0)
+
+    return state
+
+
+N_TRIALS = 1000
+results = {}
+errors = []
+
+init_csv()
+try:
+    for seed in range(N_TRIALS):
+        rng = random.Random(seed)
+        try:
+            import io
+            import contextlib
+            with contextlib.redirect_stdout(io.StringIO()):
+                final_state = run_one_trial(seed, rng)
+            results[final_state] = results.get(final_state, 0) + 1
+        except Exception as e:
+            errors.append((seed, type(e).__name__, str(e)))
+            results["EXCEPTION"] = results.get("EXCEPTION", 0) + 1
+finally:
+    close_csv()
+    time_module.sleep = _real_sleep  # 後片付け
 
 print(f"=== {N_TRIALS}回試行した結果 ===\n")
 for k, v in results.items():
@@ -142,3 +233,5 @@ if errors:
         print(f"  seed={seed}: {exc_type}: {msg}")
 else:
     print("\n異常終了は0件でした")
+
+print(f"\nstate遷移ログを書き出しました: {_CSV_PATH}")
