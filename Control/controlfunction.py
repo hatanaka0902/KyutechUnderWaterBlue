@@ -8,6 +8,8 @@ if _CONTROL_DIR not in sys.path:
 
 from dataclasses import dataclass
 
+import numpy as np
+
 import utility_functions
 from function import state_estimation, get_last_dt, get_last_imu_data
 from mavlink_io import ManualControl

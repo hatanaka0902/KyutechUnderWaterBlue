@@ -3,8 +3,13 @@
 シナリオA: マイクが一切確認できない -> 45秒でEMERGENCYへ強制遷移するはず
 シナリオB: マイクがすぐ確認できる -> 今まで通り正常にSURFACEまで進むはず(タイムアウトに巻き込まれない)
 """
+import os
 import sys, types, time as time_module
 import numpy as np
+
+_CONTROL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Control")
+if _CONTROL_DIR not in sys.path:
+    sys.path.insert(0, _CONTROL_DIR)
 
 _ctx_ref = {"ctx": None}
 _fake_pos_ref = {"pos": np.array([0.0, 0.0, 0.5])}
@@ -48,7 +53,11 @@ params.SEARCH_TIMEOUT_SEC = 0.02
 params.MAIN_LOOP_HZ = 200.0
 params.MIC_CONFIRM_TIMEOUT_SEC = 0.3  # テスト用に45秒 -> 0.3秒に短縮(比率は本番と同じ考え方)
 
-perception.get_latest_hydrophone_bearing = lambda: perception.HydrophoneBearing(pitch_deg=10.0, yaw_deg=0.0, timestamp=0.0)
+
+# pitch_deg=50.0: flow.handle_search_hydrophone は pitch_deg > HYDROPHONE_PITCH_THRESHOLD_DEG(30)
+# で「発見」と判定する(Bug B対処後の向き)。旧仕様の10.0だと発見成立せず、このテストが検証したい
+# マイク確認待ちタイムアウト経路(HOLD_TARGET -> HYDRO_DIVE以降)に入れなくなるため50.0に変更。
+perception.get_latest_hydrophone_bearing = lambda: perception.HydrophoneBearing(pitch_deg=50.0, yaw_deg=0.0, timestamp=0.0)
 flow._image_processing_available_stub = lambda: False  # HYDRO経路で検証
 
 

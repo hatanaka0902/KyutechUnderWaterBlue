@@ -115,6 +115,27 @@ def _make_relative_dive_handler(offset, next_state, self_state):
     return handler
 
 
+def _make_absolute_depth_dive_handler(depth_m, next_state, self_state):
+    """
+    「x,yは現在地を維持したまま、深度[m]だけを絶対値で目標にする」Stateのハンドラを生成する。
+    DESCEND_TO_7M専用(「7mまで潜る」は起動時の深度に依存しない絶対深度指定のはずなので、
+    _make_relative_dive_handlerの「今いる場所から+7m」とは意味が異なる)。
+    """
+    def target_fn(ctx: MissionContext) -> np.ndarray:
+        base = ctx.position if ctx.position is not None else np.zeros(3)
+        return np.array([base[0], base[1], depth_m])
+
+    def handler(ctx: MissionContext) -> State:
+        result = _move_toward(ctx, target_fn)
+        if result.emergency:
+            return State.EMERGENCY
+        if result.reached:
+            return next_state
+        return self_state
+
+    return handler
+
+
 # ---- ここから下、_image_processing_available_stub と _mic_data_from_above_stub は
 # 今回の対象外(YOLO/ハイドロフォンの相対値変換とは別の話)なので、まだスタブのまま ----
 
@@ -141,7 +162,11 @@ def handle_search_hydrophone(ctx: MissionContext) -> State:
     bearing = perception.get_latest_hydrophone_bearing()
     quat = ctx.quaternion if ctx.quaternion is not None else np.array([1.0, 0.0, 0.0, 0.0])
 
-    if bearing.pitch_deg < HYDROPHONE_PITCH_THRESHOLD_DEG:
+    # TODO(要ハードウェア仕様確認): 不等号の向きは "対象がハイドロフォンより深い(HYDRO_DIVEで
+    # さらに+2.5m潜る設計と整合)" と仮定して pitch_deg > THRESHOLD (見下ろす角度が大きい=近い) に
+    # している。ただしperception.HydrophoneBearingの「正=対象が下方向」の定義と実機の取り付け向きに
+    # 完全に依存するため、実機で必ず符号を検証すること。逆であれば `<` に戻す。
+    if bearing.pitch_deg > HYDROPHONE_PITCH_THRESHOLD_DEG:
         # 閾値を超えた瞬間の推定座標を「発見した対象の絶対座標」として記録する。
         # 以降のHOLD_TARGET/HYDRO_DIVE/HYDRO_APPROACHはこれを参照するので、
         # ここで一度も呼ばれなければ後続Stateは目標を持てない。
@@ -239,7 +264,7 @@ handle_surface = _make_relative_dive_handler((0.0, 0.0, -4.0), State.RETURN_HOME
 
 STATE_HANDLERS = {
     State.INIT: handle_init,
-    State.DESCEND_TO_7M: _make_relative_dive_handler((0.0, 0.0, 7.0), State.SEARCH_HYDROPHONE, State.DESCEND_TO_7M),
+    State.DESCEND_TO_7M: _make_absolute_depth_dive_handler(7.0, State.SEARCH_HYDROPHONE, State.DESCEND_TO_7M),
     State.SEARCH_HYDROPHONE: handle_search_hydrophone,
     State.VISUAL_DIVE: _with_mic_confirm_timeout(handle_visual_dive),
     State.VISUAL_CHECK_MIC: _with_mic_confirm_timeout(handle_visual_check_mic),
@@ -269,6 +294,7 @@ def mission_tick(ctx: MissionContext, state: State) -> State:
     global _previous_state
     if state != _previous_state:
         ctx._state_entered_at = ctx.elapsed_time
+        ctx.target_position = None
         _previous_state = state
 
     handler = STATE_HANDLERS.get(state)

@@ -2,11 +2,16 @@
 main.run_mission()を、乱数で挙動を変えるスタブを差し込みながら多数回実行し、
 状態遷移グラフに抜け・無限ループが無いかを検証する。
 """
+import os
 import sys
 import types
 import random
 import time as time_module
 import numpy as np
+
+_CONTROL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Control")
+if _CONTROL_DIR not in sys.path:
+    sys.path.insert(0, _CONTROL_DIR)
 
 # ---- センサ/MAVLinkのハードウェア依存部分を差し替える(Step1〜5と同じ理由) ----
 _ctx_ref = {"ctx": None}
@@ -35,6 +40,7 @@ fake_mavlink_io = types.ModuleType("mavlink_io")
 fake_mavlink_io.ManualControl = lambda x, y, z, yaw: None
 sys.modules["mavlink_io"] = fake_mavlink_io
 
+# Control/ 配下のモジュール（flow, perception, params, controlfunction, main）
 import flow
 import perception
 import params
